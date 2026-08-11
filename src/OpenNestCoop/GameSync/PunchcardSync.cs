@@ -1,0 +1,368 @@
+using System;
+using OpenNestCoop.Net;
+using LiteNetLib.Utils;
+using UnityEngine;
+
+using OpenNestCoop.Core;
+namespace OpenNestCoop.GameSync;
+
+/// <summary>
+/// 征信点卡牌位置同步（PunchcardRuntime，MsgType=136）。
+/// 卡牌（PunchcardRuntime）是可拖拽物品（DraggableItem），玩家从牌堆拖到
+/// RequisitionSlot（卡槽）→ 插入（槽位 CurrentCard=卡牌）→ 拉征用杆购买。
+/// 两端物理/交互独立会分叉（卡牌位置/插入槽位不同 → 购买找不到卡）。
+/// 主机权威：主机广播所有卡牌位置 + active + 是否在槽；客机本地拖放（放下瞬间）上行。
+/// 按 FindObjectsOfType 索引定位（两端同场景实例顺序一致）。
+/// </summary>
+public sealed class PunchcardSync : ISyncedModule
+{
+    public byte MsgType => 136;
+    /// <summary>卡牌入槽/出槽事件（MsgType=137）：PlaceCard/RemoveCard → 广播 → 对端执行同一操作，
+    /// 槽位 CurrentCard 两端一致（购买依赖卡牌在槽）。</summary>
+    public const byte CardSlotEventMsgType = 137;
+    private const float Interval = 0.2f;
+    private float _timer;
+    private bool _applying;
+    private int _sendLog;
+    private int _recvLog;
+    // 主机：每张卡牌上次状态签名（变化检测广播）
+    private readonly System.Collections.Generic.Dictionary<int, string> _hostSig = new();
+    // 客机：拖拽状态跟踪（放下瞬间上行一次位置）
+    private readonly System.Collections.Generic.Dictionary<PunchcardRuntime, bool> _dragState = new();
+
+    public void Tick(float dt)
+    {
+        var net = CoopRuntime.Net;
+        if (net == null) return;
+        _timer += dt;
+        if (_timer < Interval) return;
+        _timer = 0f;
+        if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;
+
+        try
+        {
+            var cards = UnityEngine.Object.FindObjectsOfType<PunchcardRuntime>(true); // includeInactive：卡牌可能 active=false（隐藏）
+            if (cards == null || cards.Length == 0) return;
+            if (net.IsHost)
+                HostSendChanges(net, cards);
+            else if (!_applying)
+                ClientSendDropEvents(net, cards);
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync Tick: {ex.Message}"); }
+    }
+
+    /// <summary>主机：变化检测广播所有卡牌位置/active/是否在槽（首次全量，之后只发变化的）。</summary>
+    private void HostSendChanges(NetManager net, PunchcardRuntime[] cards)
+    {
+        int n = Math.Min(cards.Length, 16);
+        var w = NetProtocol.Begin((MsgType)MsgType);
+        w.Put((byte)n);
+        bool any = false;
+        for (int i = 0; i < n; i++)
+        {
+            var c = cards[i];
+            if (c == null)
+            {
+                w.Put((byte)i); w.Put((byte)2); w.Put(0f); w.Put(0f); w.Put(0f); w.Put((byte)0);
+                continue;
+            }
+            bool inSlot = IsInRequisitionSlot(c);
+            bool act = false;
+            try { act = c.gameObject.activeSelf; } catch { }
+            var p = c.transform.position;
+            var r = c.transform.localEulerAngles;
+            string sig = $"{(inSlot ? 1 : 0)}|{(act ? 1 : 0)}|{p.x:0.###}|{p.y:0.###}|{p.z:0.###}|{r.x:0.#}|{r.y:0.#}|{r.z:0.#}";
+            if (_hostSig.TryGetValue(i, out var last) && last == sig)
+            {
+                // 无变化：inSlot=2 标记跳过（客机不应用）——⚠️ 不能广播 inSlot=1+act=0，
+                // 那会让客机把这些卡牌 SetActive(false)（客机剩余卡全消失的根因）。
+                w.Put((byte)i); w.Put((byte)2); w.Put(0f); w.Put(0f); w.Put(0f); w.Put((byte)0);
+                w.Put(0f); w.Put(0f); w.Put(0f);
+                continue;
+            }
+            _hostSig[i] = sig;
+            any = true;
+            w.Put((byte)i);
+            w.Put(inSlot ? (byte)1 : (byte)0);
+            w.Put(p.x); w.Put(p.y); w.Put(p.z);
+            w.Put(act ? (byte)1 : (byte)0);
+            w.Put(r.x); w.Put(r.y); w.Put(r.z);
+        }
+        if (!any && _hostSig.Count > 0) return; // 无变化不发
+        var data = NetProtocol.Snapshot(w);
+        net.EnqueueBatch(data, true);
+        if ((++_sendLog % 15) == 1)
+        {
+            // 诊断：打印每张卡牌 active/位置（确认客机卡牌为何被隐藏）
+            string cdiag = "";
+            for (int i = 0; i < cards.Length && i < 8; i++)
+            {
+                var c = cards[i];
+                if (c == null) { cdiag += $" #{i}:null"; continue; }
+                bool act2 = false; try { act2 = c.gameObject.activeSelf; } catch { }
+                var p2 = c.transform.position;
+                cdiag += $" #{i}:{(act2 ? "A" : "H")}@({p2.x:0.0},{p2.y:0.0},{p2.z:0.0})";
+            }
+            CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] host send n={n} sig={_hostSig.Count} cards=[{cdiag}]");
+        }
+    }
+
+    /// <summary>客机：检测拖放事件（IsBeingDragged true→false）→ 放下瞬间上行该卡牌位置（主机权威）。</summary>
+    private void ClientSendDropEvents(NetManager net, PunchcardRuntime[] cards)
+    {
+        int n = Math.Min(cards.Length, 16);
+        var w = NetProtocol.Begin((MsgType)MsgType);
+        w.Put((byte)1);
+        bool any = false;
+        for (int i = 0; i < n; i++)
+        {
+            var c = cards[i];
+            if (c == null) continue;
+            bool dragging = IsBeingDragged(c);
+            if (!_dragState.TryGetValue(c, out var prev)) { _dragState[c] = dragging; continue; }
+            if (prev && !dragging) // 刚放下
+            {
+                _dragState[c] = false;
+                var p = c.transform.position;
+                var r = c.transform.localEulerAngles;
+                w.Put((byte)i);
+                w.Put((byte)0);
+                w.Put(p.x); w.Put(p.y); w.Put(p.z);
+                w.Put(c.gameObject.activeSelf ? (byte)1 : (byte)0);
+                w.Put(r.x); w.Put(r.y); w.Put(r.z);
+                any = true;
+            }
+            else _dragState[c] = dragging;
+        }
+        if (!any) return;
+        net.EnqueueBatch(NetProtocol.Snapshot(w), false);
+        CoopRuntime.LogSource?.LogInfo("[PunchcardSync] client drop event up");
+    }
+
+    // ---------------- 卡牌入槽/出槽事件（MsgType=137）----------------
+
+    /// <summary>应用远端卡槽事件时的防环标志（Harmony patch 据此不重复上报）。</summary>
+    public static bool IsApplyingCard;
+
+    /// <summary>本地放卡（ItemSlot.PlaceItem 被调用，Harmony patch）→ 广播事件。
+    /// ⚠️ 卡牌插入卡槽走 ItemSlot.PlaceItem（不是 RequisitionSlot.PlaceCard——那个不触发）。</summary>
+    public static void OnLocalPlaceCard(ItemSlot slot, DraggableItem item)
+    {
+        try
+        {
+            if (IsApplyingCard) return;
+            var net = CoopRuntime.Net;
+            if (net == null || slot == null || item == null) return;
+            if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;
+            var card = item.GetComponent<PunchcardRuntime>();
+            if (card == null) return; // 非卡牌物品（其他 DraggableItem）不处理
+            int slotIdx = IndexOfSlot(slot);
+            int cardIdx = IndexOfCard(card);
+            CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] OnLocalPlaceCard slot={slotIdx} card={cardIdx} host={net.IsHost}");
+            if (slotIdx < 0 || cardIdx < 0) return;
+            var w = NetProtocol.Begin((MsgType)CardSlotEventMsgType);
+            w.Put((byte)1); w.Put((byte)slotIdx); w.Put((byte)cardIdx);
+            BroadcastCardEvent(w, net);
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync OnLocalPlaceCard: {ex.Message}"); }
+    }
+
+    /// <summary>本地取卡（ItemSlot.RemoveItem 被调用，Harmony patch）→ 广播事件。</summary>
+    public static void OnLocalRemoveCard(ItemSlot slot, DraggableItem item)
+    {
+        try
+        {
+            if (IsApplyingCard) return;
+            var net = CoopRuntime.Net;
+            if (net == null || slot == null || item == null) return;
+            if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;
+            var card = item.GetComponent<PunchcardRuntime>();
+            if (card == null) return;
+            int slotIdx = IndexOfSlot(slot);
+            int cardIdx = IndexOfCard(card);
+            CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] OnLocalRemoveCard slot={slotIdx} card={cardIdx} host={net.IsHost}");
+            if (slotIdx < 0 || cardIdx < 0) return;
+            var w = NetProtocol.Begin((MsgType)CardSlotEventMsgType);
+            w.Put((byte)2); w.Put((byte)slotIdx); w.Put((byte)cardIdx);
+            BroadcastCardEvent(w, net);
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync OnLocalRemoveCard: {ex.Message}"); }
+    }
+
+    private static void BroadcastCardEvent(NetDataWriter w, NetManager net)
+    {
+        var data = NetProtocol.Snapshot(w);
+        if (net.IsHost)
+        {
+            foreach (var p in net.Roster)
+                if (!p.IsLocal) net.Transport.Send(p.SteamId, data, true);
+        }
+        else if (net.HostSteamId != 0)
+            net.Transport.Send(net.HostSteamId, data, true);
+    }
+
+    private static int IndexOfSlot(ItemSlot target)
+    {
+        try
+        {
+            var slots = UnityEngine.Object.FindObjectsOfType<ItemSlot>();
+            if (slots == null) return -1;
+            for (int i = 0; i < slots.Length; i++)
+                if (slots[i] != null && slots[i] == target) return i;
+        }
+        catch { }
+        return -1;
+    }
+
+    private static int IndexOfCard(PunchcardRuntime target)
+    {
+        try
+        {
+            var cards = UnityEngine.Object.FindObjectsOfType<PunchcardRuntime>(true); // includeInactive
+            if (cards == null) return -1;
+            for (int i = 0; i < cards.Length; i++)
+                if (cards[i] != null && cards[i] == target) return i;
+        }
+        catch { }
+        return -1;
+    }
+
+    /// <summary>按索引找卡牌（优先索引；兜底按 CurrentDefinition 匹配）。</summary>
+    private static PunchcardRuntime FindCard(int idx, PunchcardRuntime[] cards)
+    {
+        if (cards == null || cards.Length == 0) return null;
+        if (idx >= 0 && idx < cards.Length && cards[idx] != null) return cards[idx];
+        return null;
+    }
+
+    /// <summary>处理卡槽事件（137）：对端执行 PlaceCard/RemoveCard → 槽位 CurrentCard 两端一致。</summary>
+    private void ApplyCardSlotEvent(NetDataReader r, NetManager net, ulong from)
+    {
+        byte ev = r.GetByte();
+        byte slotIdx = r.GetByte();
+        byte cardIdx = r.GetByte();
+        if (net.IsHost)
+        {
+            // 主机转发给其他客机（不含发起者）
+            var fwd = NetProtocol.Begin((MsgType)CardSlotEventMsgType);
+            fwd.Put(ev); fwd.Put(slotIdx); fwd.Put(cardIdx);
+            var fd = NetProtocol.Snapshot(fwd);
+            foreach (var p in net.Roster)
+                if (!p.IsLocal && (ulong)p.SteamId != from)
+                    net.Transport.Send(p.SteamId, fd, true);
+        }
+        var slots = UnityEngine.Object.FindObjectsOfType<ItemSlot>();
+            var cards = UnityEngine.Object.FindObjectsOfType<PunchcardRuntime>(true); // includeInactive
+        CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] recv CardSlotEvent ev={ev} slot={slotIdx} card={cardIdx} nSlots={(slots?.Length ?? 0)} nCards={(cards?.Length ?? 0)}");
+        if (slots == null || slots.Length == 0) return;
+        if (slotIdx >= slots.Length || slots[slotIdx] == null) return;
+        var card = FindCard(cardIdx, cards);
+        if (card == null) return;
+        IsApplyingCard = true;
+        try
+        {
+            if (ev == 1)
+            {
+                slots[slotIdx].PlaceItem(card.DraggableItem);
+                CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] apply PlaceItem slot={slotIdx} card={cardIdx}");
+            }
+            else if (ev == 2)
+            {
+                slots[slotIdx].RemoveItem(card.DraggableItem);
+                CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] apply RemoveItem slot={slotIdx} card={cardIdx}");
+            }
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync ApplyCardSlotEvent: {ex.Message}"); }
+        finally { IsApplyingCard = false; }
+    }
+
+    public void OnPacket(ulong from, byte[] data)
+    {
+        var net = CoopRuntime.Net;
+        if (net == null) return;
+        try
+        {
+            var r = new NetDataReader(data);
+            byte msgType = r.GetByte();
+            if (msgType == CardSlotEventMsgType)
+            {
+                ApplyCardSlotEvent(r, net, from);
+                return;
+            }
+            int n = r.GetByte();
+            var cards = UnityEngine.Object.FindObjectsOfType<PunchcardRuntime>(true); // includeInactive
+            _applying = true;
+            try
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    int idx = r.GetByte();
+                    byte inSlot = r.GetByte();
+                    float x = r.GetFloat();
+                    float y = r.GetFloat();
+                    float z = r.GetFloat();
+                    bool act = true;
+                    if (r.AvailableBytes >= 1) act = r.GetByte() != 0;
+                    float rx = 0f, ry = 0f, rz = 0f;
+                    if (r.AvailableBytes >= 12) { rx = r.GetFloat(); ry = r.GetFloat(); rz = r.GetFloat(); }
+                    if (inSlot == 2) continue; // 无变化跳过（不要应用占位值）
+                    if (cards == null || idx < 0 || idx >= cards.Length) continue;
+                    var c = cards[idx];
+                    if (c == null) continue;
+                    // 本端正在拖动该卡牌：位置由本地 DraggableItem 控制，不覆盖
+                    if (IsBeingDragged(c)) continue;
+                    // ⚠️ 客机端：非槽位（牌堆）卡牌不应用主机位置——卡牌拖拽由客机本地控制
+                    // （谁操作谁权威），防止每 0.2s 位置同步覆盖拖拽 → 客机无法拖动卡牌。
+                    // 只应用槽位（inSlot=1）卡牌位置/旋转（吸附到槽位锚点）。
+                    if (!net.IsHost && inSlot != 1) continue;
+                    try
+                    {
+                        if (c.gameObject.activeSelf != act) c.gameObject.SetActive(act);
+                        c.transform.position = new Vector3(x, y, z);
+                        c.transform.localEulerAngles = new Vector3(rx, ry, rz);
+                    }
+                    catch { }
+                }
+            }
+            finally { _applying = false; }
+            if (net.IsHost) net.EnqueueBatch(data, true); // 转发给其他客户端
+            if ((++_recvLog % 15) == 1)
+                CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] recv n={n} local={(cards?.Length ?? 0)}");
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync OnPacket: {ex.Message}"); }
+    }
+
+    /// <summary>卡牌是否正在被本端玩家拖动（拖动中位置由本地 DraggableItem 控制，快照不覆盖）。</summary>
+    private static bool IsBeingDragged(PunchcardRuntime c)
+    {
+        try
+        {
+            var d = c.GetComponent<DraggableItem>();
+            return d != null && d.IsBeingDragged;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>卡牌是否已在某 RequisitionSlot 卡槽里（在槽里时位置由槽控制，PunchcardSync 不覆盖）。</summary>
+    private static bool IsInRequisitionSlot(PunchcardRuntime c)
+    {
+        try
+        {
+            var slots = UnityEngine.Object.FindObjectsOfType<RequisitionSlot>();
+            if (slots == null) return false;
+            foreach (var s in slots)
+            {
+                if (s == null) continue;
+                var cc = s.CurrentCard;
+                if (cc != null && cc.gameObject != null && cc.gameObject == c.gameObject)
+                    return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    public void OnSessionStarted() { }
+    public void OnSessionEnded() { Reset(); }
+    public void Reset() { _timer = 0f; _applying = false; _hostSig.Clear(); _dragState.Clear(); }
+}
