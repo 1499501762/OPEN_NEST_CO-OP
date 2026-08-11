@@ -1,0 +1,47 @@
+# ================= Open Nest Co-op Mod — .gitignore =================
+# 开源仓库：只提交源码/文档/脚本；不提交构建产物与本地私有文件。
+
+# ---------- .NET / C# 构建产物 ----------
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.nupkg
+packages/
+
+# ---------- 本地私有/参考 ----------
+ref/
+memories/
+
+# ---------- 程序集分析产物 ----------
+tools/dump_*.txt
+tools/*.bin
+
+# ---------- VS Code ----------
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# ---------- 日志 ----------
+*.log
+Logs/
+logs/
+
+# ---------- 操作系统 / 编辑器 ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.tmp
+
+# ---------- 本地部署（游戏目录拷贝输出，勿提交） ----------
+deploy/
+dist/
+
+# ---------- 本地环境配置（复制自 env.example.ps1，含本机绝对路径） ----------
+scripts/env.ps1
+scripts/interopdump/
+# ---------- 打包产物（release/，勿提交） ----------
+release/
