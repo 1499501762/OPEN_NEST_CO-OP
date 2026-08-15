@@ -1,0 +1,102 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestCoop.MelonMod</AssemblyName>
+    <RootNamespace>OpenNestCoop</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.1.6</Version>
+    <!-- MELONLOADER 条件编译：PlatformUsings.cs 据此做 interop 命名空间 global using 适配 -->
+    <DefineConstants>$(DefineConstants);MELONLOADER</DefineConstants>
+    <!-- 与 BepInEx 版共用同一份源码；仅入口不同（本工程编 MelonModEntry 壳，排除 BepInEx 的 Plugin.cs） -->
+    <GameDir Condition="'$(GameDir)'==''">G:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <MLBase>$(GameDir)\MLLoader</MLBase>
+    <!-- MelonLoader 宿主 dll（当前环境由 BepInEx.MelonLoader.Loader 提供；纯原生 ML 环境路径不同需调整） -->
+    <MLCore>$(GameDir)\BepInEx\plugins\BepInEx.MelonLoader.Loader</MLCore>
+    <NuGetPackageRoot Condition="'$(NuGetPackageRoot)'==''">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
+  </PropertyGroup>
+
+  <!-- 链接共享源码（OpenNestCore 通用库 + OpenNestCoop 主体；排除 BepInEx 入口壳 Plugin.cs） -->
+  <ItemGroup>
+    <Compile Include="..\OpenNestCore\**\*.cs" Exclude="..\OpenNestCore\obj\**;..\OpenNestCore\bin\**" />
+    <Compile Include="..\OpenNestCoop\Core\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\Debug\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\GameSync\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\Net\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\Patches\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\SyncV2\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\UI\**\*.cs" />
+    <Compile Include="..\OpenNestCoop\PlatformUsings.cs" Link="PlatformUsings.cs" />
+    <Compile Include="..\OpenNestCoop\GlobalUsings.cs" Link="GlobalUsings.cs" />
+    <Compile Include="..\OpenNestCoop\MelonModEntry.cs" Link="MelonModEntry.cs" />
+    <Compile Remove="..\OpenNestCoop\Plugin.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LiteNetLib" Version="2.1.4" />
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
+    <PackageReference Include="SharpGLTF.Runtime" Version="1.0.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader 0.7.3 API（MelonMod/MelonLogger/MelonInfo/MelonGame） -->
+    <Reference Include="MelonLoader" HintPath="$(MLCore)\MelonLoader.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(MLCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <!-- Harmony：MelonLoader 内嵌 0Harmony（HarmonyLib 2.10.x，与 BepInEx 同款）。
+         编译期用 BepInEx core 的 0Harmony.dll 解析；运行时由宿主（ML/BepInEx）提供。 -->
+    <Reference Include="0Harmony" HintPath="$(GameDir)\BepInEx\core\0Harmony.dll" Private="false" />
+    <!-- Unity + 游戏 interop（MelonLoader Il2CppAssemblies：最终独立部署 ML 时用这套） -->
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="Unity.InputSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Unity.InputSystem.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ImageConversionModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.ImageConversionModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AnimationModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.AnimationModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AIModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.AIModule.dll" Private="false" />
+    <!-- AssetBundle（方案 A 化身：Unity Animator + AssetBundle 加载玩家模型） -->
+    <Reference Include="UnityEngine.AssetBundleModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.AssetBundleModule.dll" Private="false" />
+    <!-- UnityWebRequest（方案 A 化身：bundle 经原生 file:// 异步加载，避开 IL2CPP span/ObjectCollected 坑） -->
+    <Reference Include="UnityEngine.UnityWebRequestModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UnityWebRequestModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UnityWebRequestAssetBundleModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UnityWebRequestAssetBundleModule.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.Core.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Net.Http" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.Net.Http.dll" Private="false" />
+    <Reference Include="Il2CppNewtonsoft.Json" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppNewtonsoft.Json.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="Il2Cppcom.rlabrecque.steamworks.net" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2Cppcom.rlabrecque.steamworks.net.dll" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CopyNuGetDeps" AfterTargets="Build">
+    <ItemGroup>
+      <_NuGetDeps Include="$(NuGetPackageRoot)litenetlib\2.1.4\lib\netstandard2.1\LiteNetLib.dll"
+                  Condition="Exists('$(NuGetPackageRoot)litenetlib\2.1.4\lib\netstandard2.1\LiteNetLib.dll')" />
+      <_NuGetDeps Include="$(NuGetPackageRoot)sharpgltf.core\1.0.6\lib\net6.0\SharpGLTF.Core.dll"
+                  Condition="Exists('$(NuGetPackageRoot)sharpgltf.core\1.0.6\lib\net6.0\SharpGLTF.Core.dll')" />
+      <_NuGetDeps Include="$(NuGetPackageRoot)sharpgltf.runtime\1.0.6\lib\net6.0\SharpGLTF.Runtime.dll"
+                  Condition="Exists('$(NuGetPackageRoot)sharpgltf.runtime\1.0.6\lib\net6.0\SharpGLTF.Runtime.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_NuGetDeps)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- 构建后部署到 MelonLoader Mods 目录 -->
+  <Target Name="DeployToMods" AfterTargets="Build" Condition="'$(DeployToMods)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)*.dll;$(TargetDir)*.pdb" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)"
+          DestinationFolder="$(MLBase)\Mods\"
+          SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed to $(MLBase)\Mods\" />
+  </Target>
+
+</Project>

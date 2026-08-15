@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestCore</AssemblyName>
+    <RootNamespace>OpenNestCore</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.1.0</Version>
+    <!-- 通用工具库：OpenNest 联机模组的平台无关通用能力（日志 / 化身扩展 API / AssetBundle IL2CPP 工具）。
+         给第三方模组开发者引用本 dll；OpenNestCoop/MelonMod 通过链接源码使用（避免 interop 双平台兼容问题）。 -->
+    <GameDir Condition="'$(GameDir)'==''">G:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+    <!-- MelonLoader interop 目录。注意：两加载器的 Il2CppInterop.Runtime 版本不同
+         （BepInEx 1.5.3 / MelonLoader 1.5.1），第三方跨平台引用需用对应平台编译的 dll。 -->
+    <MelonLoaderDir Condition="'$(MelonLoaderDir)'==''">D:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator\MelonLoader</MelonLoaderDir>
+    <!-- 双平台互操作切换：-p:UseMelonLoaderInterop=true 时按 MelonLoader interop 编译 -->
+    <UseMelonLoaderInterop Condition="'$(UseMelonLoaderInterop)'==''">false</UseMelonLoaderInterop>
+    <InteropRoot Condition="'$(UseMelonLoaderInterop)'=='true'">$(MelonLoaderDir)\Il2CppAssemblies</InteropRoot>
+    <InteropRoot Condition="'$(UseMelonLoaderInterop)'!='true'">$(BepInExDir)\interop</InteropRoot>
+    <InteropCore Condition="'$(UseMelonLoaderInterop)'=='true'">$(MelonLoaderDir)\net6</InteropCore>
+    <InteropCore Condition="'$(UseMelonLoaderInterop)'!='true'">$(BepInExDir)\core</InteropCore>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Il2CppInterop（Il2CppObjectBase/Il2CppArrayBase 等基类；按平台切换 BepInEx core / MelonLoader net6） -->
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(InteropCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <!-- Unity（游戏内 interop 程序集，不复制；按平台切换 BepInEx interop / MelonLoader Il2CppAssemblies） -->
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(InteropRoot)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(InteropRoot)\UnityEngine.dll" Private="false" />
+    <!-- AssetBundle（加载工具） -->
+    <Reference Include="UnityEngine.AssetBundleModule" HintPath="$(InteropRoot)\UnityEngine.AssetBundleModule.dll" Private="false" />
+    <!-- Il2Cpp 系统程序集（FileStream 等互操作基类） -->
+    <Reference Include="Il2Cppmscorlib" HintPath="$(InteropRoot)\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(InteropRoot)\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(InteropRoot)\Il2CppSystem.Core.dll" Private="false" />
+  </ItemGroup>
+
+</Project>

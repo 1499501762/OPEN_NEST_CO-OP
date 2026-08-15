@@ -1,0 +1,87 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestCoop</AssemblyName>
+    <RootNamespace>OpenNestCoop</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.1.6</Version>
+    <!-- 游戏目录：优先取 MSBuild 环境变量 GameDir（scripts/env.ps1 → deploy.ps1 设置）；
+         未设置时回退到本机默认路径（IDE 直接构建仍可用；其他机器请改这里或设环境变量）。 -->
+    <GameDir Condition="'$(GameDir)'==''">G:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+    <!-- dotnet build 不一定设置 NuGetPackageRoot，显式回退到用户缓存，确保 LiteNetLib.dll 能找到 -->
+    <NuGetPackageRoot Condition="'$(NuGetPackageRoot)'==''">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 网络序列化轮子（仅用其 NetDataWriter/NetDataReader） -->
+    <PackageReference Include="LiteNetLib" Version="2.1.4" />
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
+    <PackageReference Include="SharpGLTF.Runtime" Version="1.0.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- OpenNestCore 通用工具库（日志/化身 API/AssetBundle 工具）——源码链接（同 MelonMod 模式，避免 interop 双平台 DLL 兼容问题） -->
+    <Compile Include="..\OpenNestCore\**\*.cs" Exclude="..\OpenNestCore\obj\**;..\OpenNestCore\bin\**" />
+    <!-- MelonLoader 入口壳仅 ML 版编译（排除，避免 BepInEx 版引用 MelonLoader.dll） -->
+    <Compile Remove="MelonModEntry.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 6 IL2CPP 运行时（游戏内提供，不复制） -->
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <!-- Unity（游戏内 interop 程序集，不复制） -->
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BepInExDir)\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(BepInExDir)\interop\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(BepInExDir)\interop\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(BepInExDir)\interop\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <!-- 新版 Input System（游戏实际使用；旧版 UnityEngine.Input 已禁用） -->
+    <Reference Include="Unity.InputSystem" HintPath="$(BepInExDir)\interop\Unity.InputSystem.dll" Private="false" />
+    <!-- UGUI + TextMeshPro（联机菜单用，游戏 UI 同款） -->
+    <Reference Include="UnityEngine.UI" HintPath="$(BepInExDir)\interop\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(BepInExDir)\interop\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(BepInExDir)\interop\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(BepInExDir)\interop\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ImageConversionModule" HintPath="$(BepInExDir)\interop\UnityEngine.ImageConversionModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AnimationModule" HintPath="$(BepInExDir)\interop\UnityEngine.AnimationModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AIModule" HintPath="$(BepInExDir)\interop\UnityEngine.AIModule.dll" Private="false" />
+    <!-- AssetBundle（方案 A 化身：Unity Animator + AssetBundle 加载玩家模型） -->
+    <Reference Include="UnityEngine.AssetBundleModule" HintPath="$(BepInExDir)\interop\UnityEngine.AssetBundleModule.dll" Private="false" />
+    <!-- UnityWebRequest（方案 A 化身：bundle 经原生 file:// 异步加载，避开 IL2CPP span/ObjectCollected 坑） -->
+    <Reference Include="UnityEngine.UnityWebRequestModule" HintPath="$(BepInExDir)\interop\UnityEngine.UnityWebRequestModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UnityWebRequestAssetBundleModule" HintPath="$(BepInExDir)\interop\UnityEngine.UnityWebRequestAssetBundleModule.dll" Private="false" />
+    <!-- Il2Cpp 系统程序集（互操作基类定义所在，不复制） -->
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(BepInExDir)\interop\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(BepInExDir)\interop\Il2CppSystem.Core.dll" Private="false" />
+    <!-- 游戏（interop，不复制） -->
+    <Reference Include="Assembly-CSharp" HintPath="$(BepInExDir)\interop\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="Steamworks" HintPath="$(BepInExDir)\interop\com.rlabrecque.steamworks.net.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- 每次构建后把 NuGet 依赖 LiteNetLib.dll / SharpGLTF.Core.dll 补齐到输出目录（纯类库 SDK 不自动复制包 DLL） -->
+  <Target Name="CopyNuGetDeps" AfterTargets="Build">
+    <ItemGroup>
+      <_NuGetDeps Include="$(NuGetPackageRoot)litenetlib\2.1.4\lib\netstandard2.1\LiteNetLib.dll" Condition="Exists('$(NuGetPackageRoot)litenetlib\2.1.4\lib\netstandard2.1\LiteNetLib.dll')" />
+      <_NuGetDeps Include="$(NuGetPackageRoot)sharpgltf.core\1.0.6\lib\net6.0\SharpGLTF.Core.dll" Condition="Exists('$(NuGetPackageRoot)sharpgltf.core\1.0.6\lib\net6.0\SharpGLTF.Core.dll')" />
+      <_NuGetDeps Include="$(NuGetPackageRoot)sharpgltf.runtime\1.0.6\lib\net6.0\SharpGLTF.Runtime.dll" Condition="Exists('$(NuGetPackageRoot)sharpgltf.runtime\1.0.6\lib\net6.0\SharpGLTF.Runtime.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_NuGetDeps)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- 构建后自动部署到游戏插件目录（BepInEx 6 从 plugins 根目录加载）：dotnet build -p:DeployToGame=true -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)*.dll;$(TargetDir)*.pdb" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFolder="$(BepInExDir)\plugins\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed to $(BepInExDir)\plugins\" />
+  </Target>
+
+</Project>
