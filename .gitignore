@@ -1,0 +1,58 @@
+# ================= Open Nest Co-op Mod — .gitignore =================
+# 开源仓库：只提交源码/文档/脚本；不提交构建产物与本地私有文件。
+
+# ---------- .NET / C# 构建产物 ----------
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.nupkg
+packages/
+
+# ---------- 本地私有/参考 ----------
+ref/
+memories/
+.github/
+
+# ---------- 程序集分析产物（tools/playerbundle 例外：保留为玩家化身模型范例） ----------
+tools/*
+!tools/playerbundle/
+tools/playerbundle/*
+!tools/playerbundle/BundleOut/
+tools/playerbundle/BundleOut/*
+!tools/playerbundle/BundleOut/player.bundle
+
+# ---------- VS Code ----------
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# ---------- 日志 ----------
+*.log
+Logs/
+logs/
+runlog/
+
+# ---------- 操作系统 / 编辑器 ----------
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.tmp
+
+# ---------- 本地部署（游戏目录拷贝输出，勿提交） ----------
+deploy/
+dist/
+
+# ---------- 本地模型源/动画数据（勿提交；范例请用 tools/playerbundle/BundleOut/player.bundle） ----------
+model/
+
+# ---------- 本地环境配置（复制自 env.example.ps1，含本机绝对路径） ----------
+scripts/env.ps1
+scripts/interopdump/
+# ---------- 打包产物（release/，勿提交） ----------
+release/
+
+src/OpenNestCore/artifacts/
