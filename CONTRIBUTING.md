@@ -11,7 +11,7 @@ tolerated. Keep discussions focused on the project.
 
 ## How to Report an Issue
 
-Open an [Issue](https://github.com/1499501762/OPEN-NEST-CO-OP-/issues) and
+Open an [Issue](https://github.com/1499501762/OPEN_NEST_CO-OP/issues) and
 include:
 
 - **Game / mod version** (see the BepInEx console line on load) and OS

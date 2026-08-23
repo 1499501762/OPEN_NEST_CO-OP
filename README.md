@@ -129,9 +129,10 @@ docs/               API.md, DEVELOPMENT.md, LOBBY.md, NATIVE_UI.md, TASK_SYSTEM.
 - Open an **Issue** for bugs, questions, or feature requests.
 - **Fork + Pull Request** for code changes — branch from the **current** `main` of this
   repo (public `main` keeps a continuous, non-rewritten history, so PRs stay mergeable).
-- Development happens in the **private** upstream repo (contains build env / private refs);
-  this public repo is a **release snapshot** with a clean history. Prebuilt binaries and
-  local private files are **not** distributed with this repo.
+- This public repo is the collaboration point (issues / PRs welcome). Internal
+  development and build env live in a separate private repo, so a PR here may be
+  re-created or mirrored there — either way your contribution lands in the mod.
+  Prebuilt binaries and local private files are **not** distributed with this repo.
 
 ## Third-Party Assets
 
