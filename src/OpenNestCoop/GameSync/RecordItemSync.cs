@@ -20,6 +20,16 @@ public sealed class RecordItemSync : ISyncedModule
     private bool _applying;
     private int _sendLog;
     private int _recvLog;
+    // ⚠️ 实例缓存（2026-08-25 帧性能）：FindObjectsOfType 全场景扫描很贵（曾占 ~66ms/s）——低频刷新（3s + 场景切换）
+    private RecordItem[] _cache;
+    private float _cacheTimer;
+    private int _cacheScene = -1;
+    private const float CacheRefreshSec = 3f;
+    // ⚠️ 2026-08-25 帧性能：RecordPlayerController 播放器数组缓存——IsInRecordSlot 原每张唱片每 0.2s 全场景
+    // FindObjectsOfType<RecordPlayerController>()（frame.log 曾占 ~50ms/s）→ 低频刷新（3s + 场景切换）
+    private static RecordPlayerController[] _playerCache;
+    private static float _playerCacheTimer;
+    private static int _playerCacheScene = -1;
     // 主机：每张唱片上次位置签名（变化检测广播，避免每帧全量覆盖客机）
     private readonly System.Collections.Generic.Dictionary<string, string> _hostSig = new();
     // 客机：拖拽状态跟踪（放下瞬间上行一次位置，主机权威）
@@ -36,7 +46,8 @@ public sealed class RecordItemSync : ISyncedModule
 
         try
         {
-            var items = UnityEngine.Object.FindObjectsOfType<RecordItem>();
+            EnsureCache(dt);
+            var items = _cache;
             if (items == null || items.Length == 0) return;
             if (net.IsHost)
                 HostSendChanges(net, items);
@@ -44,6 +55,19 @@ public sealed class RecordItemSync : ISyncedModule
                 ClientSendDropEvents(net, items);
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"RecordItemSync Tick: {ex.Message}"); }
+    }
+
+    /// <summary>场景实例缓存刷新：FindObjectsOfType 每 CacheRefreshSec 或场景切换才扫一次（省全场景扫描）。</summary>
+    private void EnsureCache(float dt)
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        _cacheTimer -= dt;
+        if (_cache == null || sc != _cacheScene || _cacheTimer <= 0f)
+        {
+            _cacheTimer = CacheRefreshSec;
+            _cacheScene = sc;
+            _cache = UnityEngine.Object.FindObjectsOfType<RecordItem>();
+        }
     }
 
     /// <summary>主机：变化检测广播所有唱片位置（首次全量，之后只发变化的）。</summary>
@@ -72,7 +96,7 @@ public sealed class RecordItemSync : ISyncedModule
         var data = NetProtocol.Snapshot(w);
         net.EnqueueBatch(data, true);
         if ((++_sendLog % 15) == 1)
-            CoopRuntime.LogSource?.LogInfo($"[RecordItemSync] host send n={n} sig={_hostSig.Count}");
+            CoopLog.Debug("RecordItemSync.hostSend", () => $"[RecordItemSync] host send n={n} sig={_hostSig.Count}");
     }
 
     /// <summary>客机：检测拖放事件（IsBeingDragged true→false）→ 放下瞬间上行该唱片位置一次（主机权威）。</summary>
@@ -152,12 +176,13 @@ public sealed class RecordItemSync : ISyncedModule
         catch { return false; }
     }
 
-    /// <summary>唱片是否在某台唱片机的槽里（在槽里时位置由槽控制，RecordItemSync 不覆盖）。</summary>
+    /// <summary>唱片是否在某台唱片机的槽里（在槽里时位置由槽控制，RecordItemSync 不覆盖）。
+    /// ⚠️ 2026-08-25 帧性能：改用播放器数组缓存（GetPlayerCache）——原每唱片每 0.2s 全场景 FindObjectsOfType 是 50ms/s 大头。</summary>
     private static bool IsInRecordSlot(RecordItem it)
     {
         try
         {
-            var players = UnityEngine.Object.FindObjectsOfType<RecordPlayerController>();
+            var players = GetPlayerCache();
             if (players == null) return false;
             foreach (var p in players)
             {
@@ -173,7 +198,22 @@ public sealed class RecordItemSync : ISyncedModule
         catch { }
         return false;
     }
+/// <summary>RecordPlayerController 播放器数组缓存（低频 3s 刷新 + 场景切换）——省 IsInRecordSlot 高频全场景扫描。
+    /// ⚠️ static：IsInRecordSlot 是 static（HostSendChanges 每唱片调用），播放器数组跨实例共享。</summary>
+    private static RecordPlayerController[] GetPlayerCache()
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        _playerCacheTimer -= UnityEngine.Time.unscaledDeltaTime;
+        if (_playerCache == null || sc != _playerCacheScene || _playerCacheTimer <= 0f)
+        {
+            _playerCacheTimer = CacheRefreshSec;
+            _playerCacheScene = sc;
+            _playerCache = UnityEngine.Object.FindObjectsOfType<RecordPlayerController>();
+        }
+        return _playerCache;
+    }
 
+    
     public void OnSessionStarted() { }
     public void OnSessionEnded() { Reset(); }
     public void Reset() { _timer = 0f; _applying = false; _hostSig.Clear(); _dragState.Clear(); }

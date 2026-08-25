@@ -35,7 +35,7 @@ public static class RequisitionSync
                     int c = 0;
                     try { c = p.CurrentCharges; } catch { }
                     if ((++_powderSeenLog % 20) == 1)
-                        CoopRuntime.LogSource?.LogInfo($"[Requisition] powder stock getter={c}");
+                        CoopLog.Debug("Requisition.powderGetter", () => $"[Requisition] powder stock getter={c}");
                     return c;
                 },
                 v =>
@@ -53,7 +53,7 @@ public static class RequisitionSync
                         // ApplyInventoryAvailabilityToUI() 依据库存驱动——只改库存不刷新 UI，
                         // 客机端按钮状态不同步（"第五个指示灯黑/无法激活"根因）。
                         RefreshPowderUI();
-                        CoopRuntime.LogSource?.LogInfo($"[Requisition] powder stock apply {cur}->{v}");
+                        CoopLog.Debug("Requisition.powderApply", () => $"[Requisition] powder stock apply {cur}->{v}");
                     }
                     catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"RequisitionSync powder: {ex.Message}"); }
                 }).ClientNoSend = true;
@@ -67,7 +67,7 @@ public static class RequisitionSync
                 {
                     // 只读：客机只接收显示值，不写回（interop get only）——点数由主机购买事件权威驱动
                     if ((++_pointsApplyLog % 20) == 1)
-                        CoopRuntime.LogSource?.LogInfo($"[Requisition] points recv={v} (readonly)");
+                        CoopLog.Debug("Requisition.pointsRecv", () => $"[Requisition] points recv={v} (readonly)");
                 }).ClientNoSend = true;
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"RequisitionSync Register: {ex.Message}"); }

@@ -6,49 +6,44 @@ namespace OpenNestCoop.Debug;
 
 /// <summary>
 /// 调试工具：准星对准可交互物品时，屏幕顶部显示其名字 + 完整路径 + 交互组件。
-/// 按 F9 开关。用于定位"发射拉索绑定拉杆"等游戏内无提示名的对象（可交互物品的 GameObject 名）。
-/// 默认关闭；仅在本地回环测试模式（LocalMode，--local host/join）自动开启，正常联机不显示。
+/// 显示由 <see cref="DiagCycleController"/> 统一控制（按 F9 在 帧性能/网络/交互工具/不显示 间循环）。
+/// 用于定位“发射拉索绑定拉杆”等游戏内无提示名的对象（可交互物品的 GameObject 名）。
+/// F10 复制当前显示信息到系统剪贴板（保留）。
 /// </summary>
 public class InteractableNameTool : MonoBehaviour
 {
-    private bool _show = false; // 默认关闭（仅本地调试 LocalMode 自动开启）
-    private bool _userToggled;  // 用户 F9 手动切换后不再被本地模式自动覆盖
+    /// <summary>当前是否显示（由 DiagCycleController F9 循环控制，非按键自管理）。</summary>
+    private bool _show;
     private string _text = "";
     private bool _logOnce;
+    /// <summary>单例（供 DiagCycleController 切换）。</summary>
+    public static InteractableNameTool Instance { get; private set; }
 
     public InteractableNameTool(System.IntPtr ptr) : base(ptr) { }
+
+    public void Awake() { Instance = this; }
+
+    /// <summary>由 DiagCycleController（F9 循环）控制显示。</summary>
+    public void SetVisible(bool v)
+    {
+        _show = v;
+        if (v) _logOnce = false; // 重新显示时重打 "running" 日志
+    }
 
     public void Update()
     {
         try
         {
-            // 仅本地调试（LocalMode）自动开启；正常联机（Steam 等）默认关闭。
-            // ⚠️ 2026-08-16 修复：原 `if (!local) _show = false` 每帧强制关闭，Steam 联机时
-            // 用户按 F9 切到 true 后下一帧又被覆盖 → F9 永远没反应。改为只在用户未手动切换前生效，
-            // 用户 F9 切换（_userToggled）后保持手动状态，不再被每帧覆盖。
-            if (!_userToggled)
-            {
-                bool local = false;
-                try { local = CoopRuntime.Net != null && CoopRuntime.Net.LocalMode; } catch { }
-                _show = local;
-            }
-
-            // F9 手动切换（本地模式可关掉，正常联机可临时打开）
-            // ⚠️ 2026-08-15：游戏用新版 Input System，旧 UnityEngine.Input.GetKeyDown 被禁用 → F9 无响应。
-            // 改用 Input System Keyboard.current.f9Key.wasPressedThisFrame。
-            // ⚠️ 2026-08-22：新增 F10 —— 把当前 F9 显示的交互信息（名称/路径/组件）复制到系统剪贴板，
+            // F10 复制剪贴板（保留；显示切换由 DiagCycleController 统一管理）
+            // ⚠️ 2026-08-22：把当前显示的交互信息（名称/路径/组件）复制到系统剪贴板，
             // 方便把实体名贴到文档/聊天（此前只能截图或手抄）。
             try
             {
                 var kb = UnityEngine.InputSystem.Keyboard.current;
-                if (kb != null)
+                if (kb != null && kb.f10Key.wasPressedThisFrame && !string.IsNullOrEmpty(_text))
                 {
-                    if (kb.f9Key.wasPressedThisFrame) { _userToggled = true; _show = !_show; }
-                    if (kb.f10Key.wasPressedThisFrame && !string.IsNullOrEmpty(_text))
-                    {
-                        try { GUIUtility.systemCopyBuffer = _text; } catch { }
-                        CoopRuntime.LogSource?.LogInfo($"[InteractableNameTool] F10 copied to clipboard:\n{_text}");
-                    }
+                    try { GUIUtility.systemCopyBuffer = _text; } catch { }
+                    CoopRuntime.LogSource?.LogInfo($"[InteractableNameTool] F10 copied to clipboard:\n{_text}");
                 }
             }
             catch { }
@@ -86,7 +81,7 @@ public class InteractableNameTool : MonoBehaviour
                     }
                 }
             }
-            _text = $"[F9关闭|F10复制] 交互名='{target.name}'\n路径: {PathOf(target.transform)}\n组件: {ComponentsOf(target)}\n命中: {go.name}";
+            _text = $"[F9 循环] 交互工具 (3/3)  [F10复制]\n交互名='{target.name}'\n路径: {PathOf(target.transform)}\n组件: {ComponentsOf(target)}\n命中: {go.name}";
         }
         catch (System.Exception ex)
         {
@@ -97,9 +92,9 @@ public class InteractableNameTool : MonoBehaviour
     private void OnGUI()
     {
         if (!_show || string.IsNullOrEmpty(_text)) return;
-        // ⚠️ 2026-08-22：原 (12,12) 顶部被联机大厅"显示/隐藏"按钮挡住一部分 → 下移到 y=130 避开。
+        // ⚠️ 2026-08-25：统一到右上角（与帧/网络诊断共用位置——F9 循环同时只显示一个）。
         // 加高（4 行文本 + 长路径）避免截断。
-        GUI.Label(new Rect(12, 130, Screen.width - 24, 150), _text);
+        GUI.Label(new Rect(Screen.width - 460, 12, 448, 180), _text);
     }
 
     private static string PathOf(Transform t)

@@ -38,6 +38,10 @@ $SteamExe = "Iron Nest Heavy Turret Simulator.exe"
 # --- Local dual-instance test (scripts/dualtest.ps1 -Local) ---
 $LocalTestPort = 29507        # local loopback port
 $LocalTestLagMs = 170         # simulated one-way network delay (ms) for local test
+# Steam P2P 网络环境限制模拟（默认开启；设 0 关闭对应项，见 docs/NETWORK_GOVERNOR.md 六）：
+$LocalTestNetCapKBps = 200      # simulated send bandwidth cap (KB/s) - Steam P2P 社区安全范围上界
+$LocalTestNetLossPercent = 5    # simulated unreliable packet loss (%)
+$LocalTestNetPacketCapB = 1200  # simulated single-packet cap (B) - Steam unreliable 硬限制 ~1200B
 $LocalTestLagJitterMs = 50    # simulated delay jitter range +- (ms)
 
 # --- Shared lobby file (dualtest Steam mode --autohost/--autojoin) ---

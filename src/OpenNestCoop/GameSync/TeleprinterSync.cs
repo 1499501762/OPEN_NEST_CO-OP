@@ -51,6 +51,11 @@ public sealed class TeleprinterSync : ISyncedModule
     private const float StateIntervalPrinting = 0.1f;
     private bool _anyPrinting;          // 是否有打字机正在打印（决定高频广播）
     private float _printingCheckTimer;  // 打印状态检查降频（0.25s）
+    // ⚠️ 实例缓存（2026-08-25 帧性能）：FindObjectsOfType 全场景扫描很贵（曾占 ~95ms/s）——低频刷新（3s + 场景切换）
+    private Teleprinter[] _printerCache;
+    private float _cacheTimer;
+    private int _cacheScene = -1;
+    private const float CacheRefreshSec = 3f;
 
     // ---------------- 本地事件（Harmony patch 调用） ----------------
 
@@ -167,10 +172,23 @@ public sealed class TeleprinterSync : ISyncedModule
             catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"TeleprinterSync notif-lights instant-sync: {ex.Message}"); }
         }
         if ((++_log % 5) == 1)
-            CoopRuntime.LogSource?.LogInfo($"[Teleprinter] local ev={(w.Data.Length > 1 ? w.Data[1] : (byte)0)} isHost={net.IsHost}");
+            CoopLog.Debug("Teleprinter.localEv", () => $"[Teleprinter] local ev={(w.Data.Length > 1 ? w.Data[1] : (byte)0)} isHost={net.IsHost}");
     }
 
     // ---------------- 网络包 ----------------
+
+    /// <summary>场景实例缓存刷新：FindObjectsOfType 每 CacheRefreshSec 或场景切换才扫一次（省全场景扫描）。</summary>
+    private void EnsureCache(float dt)
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        _cacheTimer -= dt;
+        if (_printerCache == null || sc != _cacheScene || _cacheTimer <= 0f)
+        {
+            _cacheTimer = CacheRefreshSec;
+            _cacheScene = sc;
+            _printerCache = UnityEngine.Object.FindObjectsOfType<Teleprinter>(true);
+        }
+    }
 
     /// <summary>状态同步：定期扫描所有打字机的完整富文本（_currentFullRich），变化则广播。
     /// 打字机文本最终都落到 _currentFullRich（打印动画的完整目标文本），直接同步它最可靠——
@@ -189,7 +207,8 @@ public sealed class TeleprinterSync : ISyncedModule
             try
             {
                 anyPrinting = false;
-                var allP = UnityEngine.Object.FindObjectsOfType<Teleprinter>(true);
+                EnsureCache(dt);
+                var allP = _printerCache;
                 if (allP != null)
                     foreach (var tp in allP)
                         if (tp != null) { try { if (tp.IsPrinting) { anyPrinting = true; break; } } catch { } }
@@ -212,7 +231,8 @@ public sealed class TeleprinterSync : ISyncedModule
         if (IsApplying) return;
         try
         {
-            var all = UnityEngine.Object.FindObjectsOfType<Teleprinter>(true);
+            EnsureCache(dt);
+            var all = _printerCache;
             if (all == null || all.Length == 0) return;
             foreach (var tp in all)
             {
@@ -287,7 +307,7 @@ public sealed class TeleprinterSync : ISyncedModule
                             }
                         }
                         catch { }
-                        CoopRuntime.LogSource?.LogInfo($"[Teleprinter] state ptype={ptype}{diag} rich='{Truncate(rich)}'");
+                        CoopLog.Debug("Teleprinter.state", () => $"[Teleprinter] state ptype={ptype}{diag} rich='{Truncate(rich)}'");
                     }
                     catch { }
                 }
@@ -376,7 +396,7 @@ public sealed class TeleprinterSync : ISyncedModule
                             string curRich = (tp._currentFullRich ?? "").Trim();
                             if (curRich.Length > 0 && curRich == joined)
                             {
-                                CoopRuntime.LogSource?.LogInfo($"[Teleprinter] skip print (already shown) ptype={ptype} n={n}");
+                                CoopLog.Debug("Teleprinter.skip", () => $"[Teleprinter] skip print (already shown) ptype={ptype} n={n}");
                                 break;
                             }
                         }
@@ -440,12 +460,12 @@ public sealed class TeleprinterSync : ISyncedModule
                             try
                             {
                                 if ((++_applyDiag % 10) == 7)
-                                    CoopRuntime.LogSource?.LogInfo($"[Teleprinter] after print ptype={ptype} isPrinting={tp.IsPrinting} revealed={tp._currentRevealedCharIndex} isRunning={tp._isRunning}");
+                                    CoopLog.Debug("Teleprinter.afterPrint", () => $"[Teleprinter] after print ptype={ptype} isPrinting={tp.IsPrinting} revealed={tp._currentRevealedCharIndex} isRunning={tp._isRunning}");
                             }
                             catch { }
                         }
                         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply print: {ex.Message}"); }
-                        CoopRuntime.LogSource?.LogInfo($"[Teleprinter] applied print n={n} ptype={ptype}");
+                        CoopLog.Debug("Teleprinter.appliedPrint", () => $"[Teleprinter] applied print n={n} ptype={ptype}");
                         break;
                     }
                     case EvAppend:
@@ -455,7 +475,7 @@ public sealed class TeleprinterSync : ISyncedModule
                         if (tp == null) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply append but printer null ptype={ptype}"); return; }
                         try { tp.AppendInstant(chunk ?? "", prepend); }
                         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply append: {ex.Message}"); }
-                        CoopRuntime.LogSource?.LogInfo($"[Teleprinter] applied append prepend={prepend} ptype={ptype} chunk='{Truncate(chunk)}'");
+                        CoopLog.Debug("Teleprinter.appliedAppend", () => $"[Teleprinter] applied append prepend={prepend} ptype={ptype} chunk='{Truncate(chunk)}'");
                         break;
                     }
                     case EvState:
@@ -508,7 +528,7 @@ public sealed class TeleprinterSync : ISyncedModule
                                     textProp.SetValue(tmpObj, rich);
                                     tmpSet = true;
                                     if ((_applyDiag % 10) == 3)
-                                        CoopRuntime.LogSource?.LogInfo($"[Teleprinter] set tmp.text ok (obj={tmpObj.GetType().Name}) keepAnim={keepLocalAnimation}");
+                                        CoopLog.Debug("Teleprinter.tmpText", () => $"[Teleprinter] set tmp.text ok (obj={tmpObj.GetType().Name}) keepAnim={keepLocalAnimation}");
                                 }
                             }
                             catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] set tmp.text: {ex.Message}"); }
@@ -593,16 +613,16 @@ public sealed class TeleprinterSync : ISyncedModule
                         try { tp._animTypingState = animTyping; } catch { }
                         // 每次状态应用都打（打字机状态不频繁；keepLocalAnimation 分支对诊断客机动画恢复至关重要）
                         if ((++_applyDiag % 10) == 1)
-                            CoopRuntime.LogSource?.LogInfo($"[Teleprinter] applied state ptype={ptype} printing={printing} keepAnim={keepLocalAnimation} revealed={targetRev} animTyping={animTyping} paper=({px:0.00},{py:0.00},{pz:0.00}) rich='{Truncate(rich)}'");
+                            CoopLog.Debug("Teleprinter.appliedState", () => $"[Teleprinter] applied state ptype={ptype} printing={printing} keepAnim={keepLocalAnimation} revealed={targetRev} animTyping={animTyping} paper=({px:0.00},{py:0.00},{pz:0.00}) rich='{Truncate(rich)}'");
                         break;
                     }
                     case EvClearAll:
                         if (tp != null) { try { tp.ClearAll(); } catch { } }
-                        CoopRuntime.LogSource?.LogInfo($"[Teleprinter] applied clear-all ptype={ptype}");
+                        CoopLog.Debug("Teleprinter.clearAll", () => $"[Teleprinter] applied clear-all ptype={ptype}");
                         break;
                     case EvClearAlarm:
                         if (tp != null) { try { tp.ClearAlarm(); } catch { } }
-                        CoopRuntime.LogSource?.LogInfo($"[Teleprinter] applied clear-alarm ptype={ptype}");
+                        CoopLog.Debug("Teleprinter.clearAlarm", () => $"[Teleprinter] applied clear-alarm ptype={ptype}");
                         break;
                 }
             }

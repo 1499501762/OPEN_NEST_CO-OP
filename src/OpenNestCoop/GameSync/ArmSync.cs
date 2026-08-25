@@ -101,14 +101,29 @@ public sealed class ArmSync : ISyncedModule
     }
 
     /// <summary>对端应用：定位 ArmedFireRelayOneShot 实例 → 调用同名方法（防环）。
-    /// ⚠️ ArmedFireRelayOneShot 单实例同时管左右炮（_leftArmed + _rightArmed），
-    /// ArmLeft/ArmRight 是同一实例的方法——用 FindObjectsOfType 取实例即可，
-    /// 不依赖 Transform 路径（两端动态实例化路径可能不同 → 路径匹配静默失败根因）。</summary>
+    /// ⚠️ 2026-08-25：客机左炮 Arm 未激活——若每个 ArmedFireRelayOneShot 实例只管一炮（左/右各一），
+    /// 取 relays[0] 会调错炮。改为按方向匹配实例（path 含 Left/Right）；单实例管双炮时 fallback relays[0]。</summary>
     private static void Apply(byte ev, string path)
     {
         var relays = UnityEngine.Object.FindObjectsOfType<Zagreekie.Tools.ArmedFireRelayOneShot>(true);
-        if (relays == null || relays.Length == 0) return;
-        var relay = relays[0];
+        if (relays == null || relays.Length == 0)
+        {
+            CoopRuntime.LogSource?.LogWarning($"[ArmSync] apply ev={ev} NO RELAY FOUND (path='{path}')");
+            return;
+        }
+        bool wantLeft = ev == EvArmLeft || ev == EvDisarmLeft;
+        Zagreekie.Tools.ArmedFireRelayOneShot relay = null;
+        string rp = "";
+        foreach (var r in relays)
+        {
+            if (r == null || r.transform == null) continue;
+            string rp2 = "";
+            try { rp2 = PathOf(r.transform); } catch { }
+            bool isLeft = rp2.IndexOf("Left", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (isLeft == wantLeft) { relay = r; rp = rp2; break; }
+        }
+        if (relay == null) { relay = relays[0]; try { if (relay.transform != null) rp = PathOf(relay.transform); } catch { } }
+        CoopLog.Info("ArmSync.apply", () => $"[ArmSync] apply ev={ev} relays={relays.Length} relay='{rp}' path='{path}'", 0.5f);
         IsApplyingArm = true;
         try
         {

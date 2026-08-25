@@ -19,6 +19,8 @@ namespace OpenNestCoop.SyncV2;
 /// </summary>
 public sealed class CatSyncV2 : ISyncedModule
 {
+    /// <summary>猫 AI 软同步（高频容忍丢失）→ 全局降频时优先降。</summary>
+    public NetModulePriority NetPriority => NetModulePriority.Low;
     public static CatSyncV2 Instance { get; } = new CatSyncV2();
 
     private CatSyncV2()
@@ -138,7 +140,7 @@ public sealed class CatSyncV2 : ISyncedModule
                     w.Put(animTime);
                 }
             }, reliable: true);
-            if ((++_sendLog % 10) == 1) CoopRuntime.LogSource?.LogInfo($"[CatSyncV2] host AI state n={n}");
+            if ((++_sendLog % 10) == 1) CoopLog.Debug("CatSyncV2.hostState", () => $"[CatSyncV2] host AI state n={n}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CatSyncV2] HostBroadcastState: {ex.Message}"); }
     }

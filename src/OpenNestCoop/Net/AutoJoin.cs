@@ -14,6 +14,10 @@ namespace OpenNestCoop.Net;
 ///   --local host       本地回环模式 host（不经 Steam，监听 TCP，供双开测试）。
 ///   --local join       本地回环模式 client（不经 Steam，连 127.0.0.1 端口）。
 ///   --localport <n>    本地模式端口（默认 29507）。
+///   --nettier <t>      网络负载分级手动锁定（critical/low/normal/high；缺省自动）。
+///   --netcap <KB/s>    发送带宽上限（模拟 Steam P2P 流量限制；0=不限）。
+///   --netpacket <B>    单包上限（模拟 Steam unreliable ~1200B 硬限制；0=不限）。
+///   --netloss <%>      unreliable 丢包率（0-99；模拟高频丢包）。
 ///
 /// 用途：双开测试——
 ///   - 两个 Steam 会话（跨机/两账号）：--autohost + --autojoin（走 Steam）。
@@ -38,6 +42,12 @@ public static class AutoJoin
     public static int LagMs;
     /// <summary>网络延迟模拟：波动范围 ±ms（--lagjitter）。</summary>
     public static int JitterMs;
+    /// <summary>发送带宽上限 KB/s（--netcap，模拟 Steam P2P 流量限制；0=不限）。</summary>
+    public static int CapKBps;
+    /// <summary>单包上限 B（--netpacket，模拟 Steam unreliable ~1200B；0=不限）。</summary>
+    public static int PacketCap;
+    /// <summary>unreliable 丢包率 %（--netloss，0-99）。</summary>
+    public static int LossPercent;
     /// <summary>共享文件路径。</summary>
     public static string LobbyFile = "";
     /// <summary>新同步方案（--sync new 走 V2 测试版，默认 old V1 稳定线）。双端必须一致（握手校验，见 NetManager）。</summary>
@@ -90,17 +100,52 @@ public static class AutoJoin
                     string v = (args[++i] ?? "").Trim();
                     if (v.Equals("new", StringComparison.OrdinalIgnoreCase)) WantNewSync = true;
                 }
+                else if (a.Equals("--nettier", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    // 网络负载分级（NetworkGovernor）：critical/low/normal/high（手动锁定；缺省自动）
+                    string v = (args[++i] ?? "").Trim();
+                    NetworkGovernor.Instance.SetTier(ParseTier(v));
+                }
+                else if (a.Equals("--netcap", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    // 发送带宽上限（KB/s，模拟 Steam P2P 流量限制；0=不限）
+                    if (int.TryParse(args[++i], out int k)) CapKBps = Math.Max(0, k);
+                }
+                else if (a.Equals("--netpacket", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    // 单包上限（字节，模拟 Steam unreliable ~1200B 硬限制；0=不限）
+                    if (int.TryParse(args[++i], out int p)) PacketCap = Math.Max(0, p);
+                }
+                else if (a.Equals("--netloss", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    // unreliable 丢包率（%，0-99；模拟高频丢包）
+                    if (int.TryParse(args[++i], out int l)) LossPercent = Math.Clamp(l, 0, 99);
+                }
             }
             if (LobbyFile.Length == 0)
                 LobbyFile = Path.Combine(Path.GetTempPath(), "open_nest_lobby.txt");
             bool any = WantHost || WantJoin || WantLocalHost || WantLocalJoin;
             if (any || LagMs > 0 || JitterMs > 0)
                 CoopRuntime.LogSource?.LogInfo($"[AutoJoin] args: host={WantHost} join={WantJoin} localHost={WantLocalHost} localJoin={WantLocalJoin} port={LocalPort} lag={LagMs} jitter={JitterMs}");
-            NetLagSim.Configure(LagMs, JitterMs);
+            NetLagSim.Configure(LagMs, JitterMs, CapKBps, PacketCap, LossPercent);
         }
         catch (Exception ex)
         {
             CoopRuntime.LogSource?.LogWarning($"[AutoJoin] failed to parse args: {ex.Message}");
+        }
+    }
+
+    /// <summary>解析网络负载档位名（critical/low/normal/high），无效返回 null（自动）。</summary>
+    private static NetQualityTier? ParseTier(string v)
+    {
+        if (string.IsNullOrEmpty(v)) return null;
+        switch (v.Trim().ToLowerInvariant())
+        {
+            case "critical": return NetQualityTier.Critical;
+            case "low": return NetQualityTier.Low;
+            case "normal": return NetQualityTier.Normal;
+            case "high": return NetQualityTier.High;
+            default: return null;
         }
     }
 

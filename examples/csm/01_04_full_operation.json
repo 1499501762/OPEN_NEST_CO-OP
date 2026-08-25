@@ -1,0 +1,38 @@
+{
+  "Id": "sample.full",
+  "DisplayName": "铁巢攻防（完整综合示例）",
+  "Description": "完整任务范本：简报 → 目标（歼灭 3 目标）→ 限时 180 秒 → 并行竞争（击杀线 vs 计时线，先到者定胜负）→ 奖励 → 成功/失败双结局。组合打印/通知/目标/计时器/地图实体/并行/奖励/End/Fail。纯新增任务，不修改原任务。",
+  "SceneName": "#sym:Mission Chill",
+  "Seed": 9999,
+  "Requires": ["sample.defend"],
+  "Objectives": [
+    { "Id": "destroy", "Title": "歼灭 3 个敌军目标", "Description": "在 180 秒内摧毁全部生成的目标", "Type": "destroy", "Target": 3 }
+  ],
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "铁巢攻防战：歼灭进犯敌军，限时 180 秒！", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Notify", "Title": "任务开始", "Message": "目标已标记，开火！", "Duration": 5, "To": ["n4"] },
+    { "Id": "n4", "Kind": "Objective", "ObjectiveId": "destroy", "ObjectiveAction": "Start", "To": ["n5"] },
+    { "Id": "n5", "Kind": "StartTimer", "TimerId": "main", "Seconds": 180, "To": ["n6"] },
+    { "Id": "n6", "Kind": "Split", "To": ["s1", "wb"] },
+
+    { "Id": "s1", "Kind": "SpawnEntity", "EntityId": "full_enemy_1", "EntityName": "敌方侦察", "X": 6, "Y": 4, "Health": 40, "Armour": 0, "Role": "Enemy", "To": ["w1"] },
+    { "Id": "w1", "Kind": "WaitEntityDestroyed", "EntityId": "full_enemy_1", "To": ["k1"] },
+    { "Id": "k1", "Kind": "Objective", "ObjectiveId": "destroy", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["s2"] },
+    { "Id": "s2", "Kind": "SpawnEntity", "EntityId": "full_enemy_2", "EntityName": "敌方步兵", "X": 9, "Y": 6, "Health": 70, "Armour": 2, "Role": "Enemy", "To": ["w2"] },
+    { "Id": "w2", "Kind": "WaitEntityDestroyed", "EntityId": "full_enemy_2", "To": ["k2"] },
+    { "Id": "k2", "Kind": "Objective", "ObjectiveId": "destroy", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["s3"] },
+    { "Id": "s3", "Kind": "SpawnEntity", "EntityId": "full_enemy_3", "EntityName": "敌方装甲", "X": 11, "Y": 8, "Health": 120, "Armour": 8, "Role": "Enemy", "To": ["w3"] },
+    { "Id": "w3", "Kind": "WaitEntityDestroyed", "EntityId": "full_enemy_3", "To": ["k3"] },
+    { "Id": "k3", "Kind": "Objective", "ObjectiveId": "destroy", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["done"] },
+    { "Id": "done", "Kind": "ObjectiveComplete", "ObjectiveId": "destroy", "To": ["win"] },
+    { "Id": "win", "Kind": "Print", "Message": "全部歼灭！铁巢安全了！", "To": ["win2"] },
+    { "Id": "win2", "Kind": "AddRequisitionPoints", "Value": 50, "To": ["win3"] },
+    { "Id": "win3", "Kind": "AddShell", "ShellId": "shell.example", "Value": 5, "Slot": -1, "To": ["we"] },
+    { "Id": "we", "Kind": "End" },
+
+    { "Id": "wb", "Kind": "WaitTimerExpired", "TimerId": "main", "To": ["lose"] },
+    { "Id": "lose", "Kind": "Print", "Message": "时间到，敌军突破防线！", "To": ["le"] },
+    { "Id": "le", "Kind": "Fail" }
+  ]
+}

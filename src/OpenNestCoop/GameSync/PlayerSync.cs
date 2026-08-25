@@ -43,6 +43,13 @@ public static class PlayerSync
     private static bool _warnedNoBody;
     private static int _sendLogCount;
     private static int _recvLogCount;
+    // ⚠️ 时序保护（2026-08-25）：位置包带 seq——unreliable 位置帧乱序/晚到不覆盖心跳 reliable 权威位置（铁巢位置两端不同步根因）
+    private static ushort _posSeq;                                    // 本地发送 seq（递增，心跳 reliable 与普通 unreliable 共用）
+    private static readonly Dictionary<byte, ushort> _recvSeq = new(); // 接收端各 pid 最近 seq（去旧保新）
+    // ⚠️ 初始位置对齐（2026-08-25）：缓存各玩家最后位置（Avatar 创建用，避免化身初始在 0,0,0）+ 新成员/场景切换强制发位置
+    private static readonly Dictionary<byte, Vector3> _lastKnownPos = new();
+    private static int _lastSceneBuild = -1;
+    private static bool _forcePosSend;
 
     private static readonly Dictionary<byte, Avatar> _avatars = new Dictionary<byte, Avatar>();
 
@@ -88,6 +95,13 @@ public static class PlayerSync
     {
         var net = CoopRuntime.Net;
         if (net == null) return;
+        // 场景切换：强制下帧发本地位置（铁巢/玩家初始位置对齐）
+        try
+        {
+            int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+            if (sc != _lastSceneBuild) { _lastSceneBuild = sc; _forcePosSend = true; }
+        }
+        catch { }
 
         // 每帧：远端化身插值跟随 + 驱动角色视觉（动作/动画/billboard）
         foreach (var kv in _avatars)
@@ -171,6 +185,7 @@ public static class PlayerSync
             var r = new NetDataReader(data);
             r.GetByte(); // 跳过消息类型
             byte pid = r.GetByte();
+            ushort seq = r.GetUShort(); // 位置版本序号（时序保护）
             bool isHb = r.GetByte() != 0;   // 心跳帧标记（对端据此 reliable 转发保底）
             var pos = new Vector3(r.GetFloat(), r.GetFloat(), r.GetFloat());
             float yaw = r.GetFloat();
@@ -179,6 +194,11 @@ public static class PlayerSync
             float speed = r.GetFloat();     // v0.2.3：发送端真实水平速度
 
             if (net.Local != null && pid == net.Local.PlayerId) return; // 忽略自己
+
+            // ⚠️ 时序保护（2026-08-25）：拒绝旧/重复位置包（unreliable 乱序/晚到）——不覆盖心跳 reliable 权威位置
+            if (_recvSeq.TryGetValue(pid, out var lastSeq) && !IsNewer(seq, lastSeq)) return;
+            _recvSeq[pid] = seq;
+            _lastKnownPos[pid] = pos; // 记录各玩家最后位置（Avatar 创建/初始对齐用）
 
             // 主机：转发给其他客户端（保持星型一致；合包）——用 State 判断不依赖 Lobby.IsHost。
             // E 分级：心跳帧 reliable 转发保底，普通帧 unreliable（连续位置容忍丢）
@@ -255,7 +275,9 @@ public static class PlayerSync
         // E 分级保底：普通帧 unreliable；每 2s 无条件心跳帧 reliable（防 unreliable 长期丢包后位置漂移）
         bool hb = Time.time - _lastPosHbTime >= PlayerPosHbInterval;
         if (hb) _lastPosHbTime = Time.time;
-        if (!changed && !hb) return;
+        // 强制发送（新成员加入/场景切换）或变化或心跳：发位置
+        if (!changed && !hb && !_forcePosSend) return;
+        _forcePosSend = false;
         _hasSent = true;
 
         // v0.2.3：真实水平速度 = 距上次发送位移 / 距上次发送时间（在覆盖 _lastPos 之前计算）
@@ -273,8 +295,10 @@ public static class PlayerSync
         }
 
         // ===== 位置包（unreliable）：连续位置/移动值，容忍丢帧（下帧纠正）；心跳帧 reliable 保底防漂移 =====
+        _posSeq = (ushort)(_posSeq + 1); // 位置版本递增（心跳 reliable 与普通 unreliable 共用 → 接收端统一去旧）
         var w = NetProtocol.Begin(MsgType.PlayerPos);
         w.Put(net.Local.PlayerId);
+        w.Put(_posSeq);
         w.Put(hb ? (byte)1 : (byte)0); // 心跳帧标记（对端据此 reliable 转发保底）
         w.Put(tr.position.x); w.Put(tr.position.y); w.Put(tr.position.z);
         w.Put(yaw);
@@ -317,6 +341,14 @@ public static class PlayerSync
         // 诊断日志：约每 5s 一次，确认位置在发送
         if ((++_sendLogCount % 25) == 0)
             CoopLog.Debug("PlayerSync.send", () => $"[PlayerSync] send pid={net.Local.PlayerId} state={net.State} pos=({tr.position.x:0.0},{tr.position.y:0.0},{tr.position.z:0.0}) yaw={yaw:0}");
+    }
+
+    /// <summary>seq 是否比 last 新（回绕安全：无符号差 >0 且 <32768；last==0 视为首包）。</summary>
+    private static bool IsNewer(ushort seq, ushort last)
+    {
+        if (last == 0) return true;
+        int d = (ushort)(seq - last);
+        return d > 0 && d < 32768;
     }
 
     /// <summary>本地玩家身体位置（地面高度）。优先 FirstPersonController，回退主相机。</summary>
@@ -436,6 +468,7 @@ public static class PlayerSync
                 else
                 {
                     _avatars[p.PlayerId] = CreateAvatar(p);
+                    _forcePosSend = true; // 新成员加入：立即发自己位置（初始对齐）
                 }
             }
         }
@@ -452,7 +485,10 @@ public static class PlayerSync
 
     private static Avatar CreateAvatar(PlayerSession p)
     {
-        var a = new Avatar { PlayerId = p.PlayerId, Name = p.Name, Role = p.Role };        try
+        var a = new Avatar { PlayerId = p.PlayerId, Name = p.Name, Role = p.Role };
+        // ⚠️ 初始位置对齐：用最后已知位置（避免化身初始在 0,0,0）——铁巢（玩家）初始位置不同步修复
+        if (_lastKnownPos.TryGetValue(p.PlayerId, out var initPos)) { a.TargetPos = initPos; a.HasTarget = true; }
+        try
         {
             var tint = ColorFor(p.SteamId);
             var root = new GameObject($"CoopAvatar_{p.PlayerId}");

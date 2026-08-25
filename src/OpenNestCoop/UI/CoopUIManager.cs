@@ -87,6 +87,11 @@ public class CoopUIManager : MonoBehaviour
     private TextMeshProUGUI _roleBadge;
     private string _lastRoleBadge = "";
 
+    // 左上角开关文字 + 语言跟随（语言变化时实时更新，见 Update）
+    private TextMeshProUGUI _menuToggleText;
+    private CoopLoc.Lang _lastLang = CoopLoc.Lang.Zh;
+    private float _langPoll = 0f;
+
     private const float PW = 500f;
     private const float PH = 700f;
 
@@ -95,6 +100,7 @@ public class CoopUIManager : MonoBehaviour
     public void Start()
     {
         Instance = this;
+        CoopLoc.Refresh(); // 创建常驻 UI 前刷新语言（左上角开关文字跟随，勿默认 Zh）
         try
         {
             _roomName = CoopRuntime.Net?.PendingLobbyName ?? CoopLoc.DefaultRoomName;
@@ -108,6 +114,19 @@ public class CoopUIManager : MonoBehaviour
     // ---------------- 通用输入框桥接（CoopInputBox 组件调用） ----------------
 
     /// <summary>共享字体（供 CoopInputBox 等组件复用）。</summary>
+    /// <summary>公开开关：切换联机菜单开/关（主菜单联机入口按钮调用，见 MainMenuEntry）。</summary>
+    public static void ToggleMenu()
+    {
+        try
+        {
+            var inst = Instance;
+            if (inst == null) return;
+            inst._menuOpen = !inst._menuOpen;
+            inst.ApplyMenuState();
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] ToggleMenu: {ex.Message}"); }
+    }
+
     public static void ApplySharedFont(TextMeshProUGUI t)
     {
         try { if (Instance != null) Instance.EnsureFont(t); } catch { }
@@ -162,6 +181,22 @@ public class CoopUIManager : MonoBehaviour
 
     public void Update()
     {
+        // 语言跟随：CoopLoc 语言变化时更新常驻按钮文字（左上角开关；节流 1s，避免每帧读 LocalisationManager）
+        try
+        {
+            if (Time.unscaledTime - _langPoll >= 1f)
+            {
+                _langPoll = Time.unscaledTime;
+                CoopLoc.Refresh();
+                if (_menuToggleText != null && CoopLoc.Current != _lastLang)
+                {
+                    _lastLang = CoopLoc.Current;
+                    _menuToggleText.text = CoopLoc.MenuToggle;
+                }
+            }
+        }
+        catch { }
+
         try { PollInput(); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] PollInput: {ex.Message}"); }
 
@@ -564,12 +599,13 @@ public class CoopUIManager : MonoBehaviour
         _blocker.transform.SetAsFirstSibling();  // 置于最底层，按钮/面板在上层仍可点击
         _blocker.SetActive(false);
 
-        // 左上角开关（常驻，可重开菜单）
-        MakeButton(_root.transform, CoopLoc.MenuToggle, 8, 8, 130, 30, () =>
+        // 左上角开关（常驻，可重开菜单）；存文字引用，语言变化时实时更新（见 Update）
+        var menuToggle = MakeButton(_root.transform, CoopLoc.MenuToggle, 8, 8, 130, 30, () =>
         {
             _menuOpen = !_menuOpen;
             ApplyMenuState();
         });
+        try { _menuToggleText = menuToggle.GetComponentInChildren<TextMeshProUGUI>(true); _lastLang = CoopLoc.Current; } catch { }
 
         // 本地模式大号角色标识（左下角，常驻）：只在 LocalMode 下显示，HOST 红 / CLIENT 绿
         try
@@ -1097,8 +1133,10 @@ public class CoopUIManager : MonoBehaviour
         _content.sizeDelta = new Vector2(PW, PH);
 
         // 标题栏：纯色底 + 细边框（Castile 只用于"应用"按钮，不用在标题栏）
-        var title = MakeText(_content, $"<b>{CoopLoc.Title}</b>", 12, 6, PW - 24, 30, 18, Color.white, TextAlignmentOptions.Left);
+        var title = MakeText(_content, $"<b>{CoopLoc.Title}</b>", 12, 6, PW - 72, 30, 18, Color.white, TextAlignmentOptions.Left);
         title.richText = true;
+        // 右上角关闭按钮（关闭联机大厅面板）
+        MakeButton(_content, CoopLoc.Close, PW - 56, 6, 44, 30, () => { try { ToggleMenu(); } catch { } });
 
         float y = 42f;
         StatusLine(ref y, $"Steam: {net.Local?.Name}");

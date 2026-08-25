@@ -2,10 +2,15 @@ using System;
 using HarmonyLib;
 using OpenNestCoop.GameSync;
 using OpenNestCoop.Net;
+using OpenNestCoop.UI;
 using UnityEngine;
 using Il2CppInterop.Runtime.InteropTypes;
 
 using OpenNestCoop.Core;
+#if MELONLOADER
+using SleepyNodes = Il2CppSleepyNodes;
+using Localisation = Il2CppLocalisation; // MLL 端 interop 命名空间适配（PreTeleprinterNodeEnter 用 Localisation.TextIdentifier）
+#endif
 // Harmony 双平台一致：BepInEx 与 MelonLoader 都用 0Harmony.dll（HarmonyLib 2.10.x）。
 // ML 的 Il2Cpp 程序集里也有 Harmony 命名空间（HarmonyX 兼容别名），会把裸 'Harmony' 遮蔽成命名空间，
 // 故这里用完全限定 HarmonyLib.Harmony（两平台均有 HarmonyLib.*）。
@@ -59,10 +64,21 @@ public static class HarmonyPatches
         TryPatch(typeof(LinearSliderInteractable), "OnEnable", postfix: nameof(PostControlEnable));
         TryPatch(typeof(SliderEnergyMomentumSpinner), "OnEnable", postfix: nameof(PostControlEnable));
         TryPatch(typeof(TurretController), "OnEnable", postfix: nameof(PostControlEnable));
+        // ⚠️ 2026-08-26：.Charge Dial（弹药类型选择，棘爪档位盘）偶发不同步——疑似值源问题。
+        // patch DialValueEventWatcher.HandleDialValueChanged（拨动值变化事件）→ 读三个候选字段
+        // （accumulatedValue / currentRotationAngle / detentCurrentAngle）+ 路径，确认正确值源。
+        TryPatch(typeof(DialValueEventWatcher), "HandleDialValueChanged", postfix: nameof(PostDialValueChanged));
         // 选药量/投放发射药：Button Dispencer / Charge Rammer 点击不走 OnClickDown（走 isClicked + 方法调用），
         // 必须 patch 方法：OnChargeButtonPressed（选药量）+ OnLoadChargesPressed（投放）→ 广播 → 对端执行（含按钮动画+逻辑）
         TryPatch(typeof(PowderChargeController), "OnChargeButtonPressed", prefix: nameof(PrePowderSelect));
         TryPatch(typeof(PowderChargeController), "OnLoadChargesPressed", prefix: nameof(PrePowderLoad));
+        // ⚠️ 2026-08-26：铁巢（TurretController）位置同步——patch MoveTurret/SetTurretLocation（对齐
+        // Synchrony NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
+        // 主机权威：主机移动铁巢 postfix 广播，客机拦截本地移动（prefix）+ 接收广播应用（防环）。
+        TryPatch(typeof(TurretController), "MoveTurret",
+            prefix: nameof(NestSync.PreTurretMove), postfix: nameof(NestSync.PostTurretMove));
+        TryPatch(typeof(TurretController), "SetTurretLocation",
+            prefix: nameof(NestSync.PreTurretMove), postfix: nameof(NestSync.PostTurretSetLocation));
         // 预备激发火炮（ArmedFireRelayOneShot.ArmLeft/ArmRight/DisarmLeft/DisarmRight）——事件解耦（P0）：
         // 直接广播业务方法调用，对端调同名方法（不依赖按钮 active，修"客机拉 Arm 没用" inactive 排队丢弃）。
         // prefix：先广播再放行原方法（本地正常执行 + 对端复现），IsApplyingArm 防环。
@@ -94,6 +110,9 @@ public static class HarmonyPatches
         TryPatch(typeof(FireMission), "GenerateMission", prefix: nameof(PreFireMissionGenerate));
         // 任务打字机通知同步：UINotificationManager.ShowNotification 事件 → 主机广播 → 客机复现
         TryPatch(typeof(UINotificationManager), "ShowNotification", postfix: nameof(PostShowNotification));
+        // 主菜单联机入口（2026-08-23）：原生主菜单加载完成（MainMenuStateRelay.HandleMainMenuLoaded，private）→
+        // 注入联机入口按钮（UI/MainMenuEntry.cs）。TryPatch 找不到方法只打日志不崩；防重复在 MainMenuEntry 内。
+        TryPatch(typeof(MainMenuStateRelay), "HandleMainMenuLoaded", postfix: nameof(PostMainMenuLoaded));
         // 任务打字机打印同步：Teleprinter.SubmitLines/ClearAll/ClearAlarm → 主机广播 → 客机复现
         // prefix（PreTeleprinterPrint）：V2 模式客机本地 SubmitLines 抑制——打字机内容由主机权威广播，
         // 客机本地任务图/同 seed 打印会与主机内容重复且不一致（双份打字机根因）。
@@ -101,6 +120,19 @@ public static class HarmonyPatches
         TryPatch(typeof(Teleprinter), "AppendInstant", postfix: nameof(PostTeleprinterAppend));
         TryPatch(typeof(Teleprinter), "ClearAll", postfix: nameof(PostTeleprinterClearAll));
         TryPatch(typeof(Teleprinter), "ClearAlarm", postfix: nameof(PostTeleprinterClearAlarm));
+        // ⚠️ 自定义任务诊断：State_TeleprinterText.OnEnter 现场（prefix 只读）。
+        // ⚠️ 不加 postfix 干预：原生打字机行为由节点 JSON 字段配置决定（OnlyQueue/WaitUntilComplete）
+        // ——有的任务开局就打（OnlyQueue=false），有的等玩家靠近（OnlyQueue=true 或 TryStart 延迟）。
+        // postfix TryStart 会覆盖这些配置 → 必须移除，让原生 OnEnter 自己按节点字段驱动。
+        TryPatch(typeof(SleepyNodes.State_TeleprinterText), "OnEnter", prefix: nameof(PreTeleprinterNodeEnter));
+        // ⚠️ 自定义任务诊断：State_SpawnMapEntity.OnEnter 执行现场（prefix 只读，确认生成节点是否被图驱动）
+        TryPatch(typeof(SleepyNodes.State_SpawnMapEntity), "OnEnter", prefix: nameof(PreSpawnNodeEnter));
+        // ⚠️ 捕获打字机驱动链：SubmitLines 的 waitForTrigger 参数 + TryStart/RunQueue/ResumeCurrentJob 调用
+        // （确认原生任务"玩家靠近才打印动画"的触发机制）。Teleprinter 具体类方法无嵌套参数 → patch 安全。
+        TryPatch(typeof(Teleprinter), "SubmitLines", prefix: nameof(PreTeleprinterSubmitCapture));
+        TryPatch(typeof(Teleprinter), "TryStart", prefix: nameof(PreTeleprinterTryStartCapture));
+        TryPatch(typeof(Teleprinter), "RunQueue", prefix: nameof(PreTeleprinterRunQueueCapture));
+        TryPatch(typeof(Teleprinter), "ResumeCurrentJob", prefix: nameof(PreTeleprinterResumeCapture));
         // 玩家-猫交互事件（软同步，MsgType=133）：拾起/放下/驱赶/抚摸 → 广播 → 对端执行
         // （谁操作谁发；对端执行 StartCarrying/StopCarrying/ShooCat/PetTheCat，IsApplyingCat 防环）
         TryPatch(typeof(CatPickUpHandler), "ExecutePickUp", postfix: nameof(PostCatPickUp));
@@ -120,6 +152,10 @@ public static class HarmonyPatches
         // Harmony 处理参数 marshall 比手写 Il2Cpp 委托可靠）。回调全 try-catch，只处理 CJK
         // （>0x2E7F）避免与 PollInput 英文双通道。控制键退格/回车也处理。
         TryPatch(typeof(UnityEngine.InputSystem.Keyboard), "OnTextInput", postfix: nameof(PostKeyTextInput));
+        // 自定义任务：原生任务脚本流程级挂钩（覆盖原生任务 + 协同事件）。只 patch 流程方法
+        // （MissionManager.StartOperation/LoadMission + MissionGraph.OnMissionLoaded），不碰任务状态机。
+        // 未注册覆盖时所有原生任务放行（无副作用）。
+        OpenNestCoop.GameSync.OncMissionHooks.Apply();
     }
 
     /// <summary>文本输入转发：InputSystem 调用 OnTextInput(char)（英文直接字符 + 中文 IME 提交字符）。
@@ -144,6 +180,13 @@ public static class HarmonyPatches
         catch { } // 绝不向外抛（防崩溃）
     }
 
+    /// <summary>postfix：原生主菜单加载完成 → 注入联机入口（MainMenuEntry.OnMainMenuLoaded 内防重复）。</summary>
+    private static void PostMainMenuLoaded(string sceneName, MainMenuStateRelay __instance)
+    {
+        try { MainMenuEntry.OnMainMenuLoaded(sceneName); }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony main menu entry: {ex.Message}"); }
+    }
+
     private static void TryPatch(Type target, string method, string prefix = null, string postfix = null)
     {
         try
@@ -160,6 +203,53 @@ public static class HarmonyPatches
             CoopRuntime.LogSource?.LogInfo($"Harmony: patched {target.Name}.{method}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony: {target.Name}.{method} patch failed: {ex.Message}"); }
+    }
+
+    /// <summary>⚠️ 2026-08-26：.Charge Dial 拨动值变化诊断（值源排查）。
+    /// DialValueEventWatcher.HandleDialValueChanged(float value) 是拨动值变化的事件回调——patch postfix
+    /// 读三个候选字段（accumulatedValue / currentRotationAngle / detentCurrentAngle）+ 注册状态 + 路径，
+    /// 确认 Charge Dial（弹药类型选择棘爪档位盘）到底哪个字段反映拨动位置（当前统一读 accumulatedValue，
+    /// 若棘爪盘不走它 → 偶发不同步）。路由到 sync.log（key=chargedial.diag）。</summary>
+    private static void PostDialValueChanged(DialValueEventWatcher __instance, float value)
+    {
+        try
+        {
+            if (__instance == null) return;
+            var d = __instance.dial;
+            if (d == null || d.transform == null) return;
+            string p = "?";
+            try { p = PathOfSync(d.transform); } catch { }
+            // 只诊断 Charge Dial / Magazine Selection（弹药类型选择）
+            if (p.IndexOf("Charge Dial", StringComparison.OrdinalIgnoreCase) < 0
+                && p.IndexOf("Magazine Selection", StringComparison.OrdinalIgnoreCase) < 0
+                && p.IndexOf("Ballistic", StringComparison.OrdinalIgnoreCase) < 0)
+                return;
+            float av = 0f, rot = 0f, det = 0f, crt = 0f;
+            try { av = d.accumulatedValue; } catch { }
+            try { rot = d.currentRotationAngle; } catch { }
+            try { det = d.detentCurrentAngle; } catch { }
+            try { crt = d.currentRotationAngle; } catch { }
+            bool drag = false;
+            try { drag = d.isDragging; } catch { }
+            CoopLog.Info("chargedial.diag", () =>
+                $"[ChargeDialDiag] evVal={value:0.###} av={av:0.###} rot={rot:0.###} det={det:0.###} drag={drag} path='{p}'", 0.25f);
+        }
+        catch { }
+    }
+
+    /// <summary>HarmonyPatches 内路径辅助（取 transform 完整路径，限深度防爆）。</summary>
+    private static string PathOfSync(UnityEngine.Transform t)
+    {
+        if (t == null) return "";
+        try
+        {
+            string path = t.name ?? "";
+            var par = t.parent;
+            int dep = 0;
+            while (par != null && dep < 10) { path = (par.name ?? "") + "/" + path; par = par.parent; dep++; }
+            return path;
+        }
+        catch { return t.name ?? ""; }
     }
 
     private static bool PreHandleInput()
@@ -219,51 +309,60 @@ public static class HarmonyPatches
 
     private static void PostEvaluateImpact(UnityEngine.Vector2 __1)
     {
+        // ⚠️ 2026-08-25：落点位置同步改由 PostEvalReport 广播落点标记本地位置（EvaluateImpact loc 坐标系不确定，
+        // PositionInRootSpace 用 loc 摆错）。EvaluateImpact 本身不再广播。
+        // ⚠️ 2026-08-26：恢复**计数诊断**（不发包）——用户"一发着弹触发多次"：每发炮弹着弹应调 EvaluateImpact 1 次，
+        // 若多次 → 炮弹重复着弹/多路径评估。计数 + 时间戳（对比 ShellVisual.Initialize 发射计数）。
         _impactEvalCount++;
-        try
-        {
-            string st = "";
-            try
-            {
-                var stk = Environment.StackTrace;
-                if (!string.IsNullOrEmpty(stk))
-                {
-                    var lines = stk.Split('\n');
-                    for (int i = 0; i < lines.Length && i < 8; i++)
-                    {
-                        string ln = lines[i].Trim();
-                        if (ln.Length == 0) continue;
-                        if (ln.StartsWith("at ") || ln.StartsWith("   at ")) ln = ln.Substring(ln.IndexOf("at ") + 3);
-                        // 截断：只保留方法名+文件:行（前 ~110 字符），过滤本 patch 自身
-                        if (ln.Contains("HarmonyPatches") || ln.Contains("PostEvaluateImpact")) continue;
-                        st += (st.Length > 0 ? " | " : "") + (ln.Length > 110 ? ln.Substring(0, 110) : ln);
-                    }
-                }
-            }
-            catch { }
-            CoopRuntime.LogSource?.LogInfo($"[ImpactDiag] EvaluateImpact n={_impactEvalCount} t={UnityEngine.Time.time:0.00} loc=({__1.x:0.0},{__1.y:0.0}) call=[{st}]");
-        }
-        catch { }
+        try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] EvaluateImpact n={_impactEvalCount} t={UnityEngine.Time.time:0.00} loc=({__1.x:0.00},{__1.y:0.00})"); } catch { }
     }
     private static void PostShellInit()
     {
         _shellInitCount++;
-        try { CoopRuntime.LogSource?.LogInfo($"[ImpactDiag] ShellVisual.Initialize n={_shellInitCount} t={UnityEngine.Time.time:0.00}"); } catch { }
+        try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] ShellVisual.Initialize n={_shellInitCount} t={UnityEngine.Time.time:0.00}"); } catch { }
     }
     private static void PostSpawnImpact()
     {
         _impactFxCount++;
-        try { CoopRuntime.LogSource?.LogInfo($"[ImpactDiag] SpawnImpactEffectAt n={_impactFxCount} t={UnityEngine.Time.time:0.00}"); } catch { }
-    }
-    private static void PostEvalReport()
+        try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] SpawnImpactEffectAt n={_impactFxCount} t={UnityEngine.Time.time:0.00}"); } catch { }
+    }    private static void PostEvalReport(ImpactLocation __instance)
     {
-        _evalReportCount++;
-        try { CoopRuntime.LogSource?.LogInfo($"[ImpactDiag] ImpactLocation.EvaluateAndReport n={_evalReportCount} t={UnityEngine.Time.time:0.00}"); } catch { }
+        try
+        {
+            // ⚠️ 2026-08-25：落点位置同步——主机广播落点标记本地位置，客户端把标记本地位置设为主机值
+            // （两端父对象一致 → 本地坐标通用；绕开 EvaluateImpact loc 坐标系不确定）
+            if (OpenNestCoop.Net.AutoJoin.WantNewSync) return;
+            if (__instance == null || __instance.transform == null) return;
+            var net = CoopRuntime.Net;
+            // 落点标记父链诊断（确认 ImpactLocation_AP 是不是战术地图落点标记）
+            string pth = "?";
+            try
+            {
+                var tr2 = __instance.transform;
+                var sb = new System.Text.StringBuilder(tr2.name ?? "");
+                int dep = 0;
+                while (tr2.parent != null && dep < 6) { tr2 = tr2.parent; sb.Insert(0, (tr2.name ?? "") + "/"); dep++; }
+                pth = sb.ToString();
+            }
+            catch { }
+            var lpD = __instance.transform.localPosition;
+            CoopLog.Info("impact.sync4", () => $"[ImpactSync] EvalReport path='{pth}' local=({lpD.x:0.00},{lpD.y:0.00}) parentW=({__instance.transform.position.x:0.00},{__instance.transform.position.z:0.00})", 0.5f);
+            if (net != null && net.IsHost)
+            {
+                var lp = __instance.transform.localPosition;
+                GameSync.ImpactSync.Instance?.BroadcastMarkPos(new UnityEngine.Vector2(lp.x, lp.y));
+            }
+            else
+            {
+                GameSync.ImpactSync.Instance?.ApplyTo(__instance);
+            }
+        }
+        catch { }
     }
     private static void PostReportNextFrame()
     {
         _reportNextFrameCount++;
-        try { CoopRuntime.LogSource?.LogInfo($"[ImpactDiag] ImpactLocation.ReportLocationNextFrame n={_reportNextFrameCount} t={UnityEngine.Time.time:0.00}"); } catch { }
+        try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] ImpactLocation.ReportLocationNextFrame n={_reportNextFrameCount} t={UnityEngine.Time.time:0.00}"); } catch { }
     }
 
     private static bool PreLookClick(LookAtTarget __instance)
@@ -368,7 +467,8 @@ public static class HarmonyPatches
         try
         {
             if (OpenNestCoop.Net.AutoJoin.WantNewSync) { SyncV2.ReconPhotoSyncV2.Instance.OnLocalPhoto(); return true; }
-            ReconPhotoSync.Instance?.OnLocalPhoto();
+            // ⚠️ 2026-08-25：传 child（照片对象）→ ReconPhotoSync 主机权威同步照片位置（seed 只同步内容，位置各自算不同步）
+            ReconPhotoSync.Instance?.OnLocalPhoto(child);
         }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony PreRegisterChild: {ex.Message}"); }
         return true; // 继续原方法（生成照片对象）
@@ -465,8 +565,20 @@ public static class HarmonyPatches
     {
         try
         {
+            // ⚠️ 2026-08-26 诊断：GenerateMission 触发时 dump seed 应用状态 + 当前 Entities 数——
+            // 定位“客机实体少（23 vs 主机 31）”：两端同 seed 应生成相同实体，若客机 GenerateMission 时
+            // seed 未应用（fixedSeed=0/useFixedSeed=false）→ 随机不同 → 实体数不同。
+            int entCount = -1;
+            try { if (__instance != null && __instance.Entities != null) entCount = __instance.Entities.Count; } catch { }
+            int fseed = -1; bool ufix = false;
+            try { fseed = (int)__instance.fixedSeed; } catch { }
+            try { ufix = __instance.useFixedSeed; } catch { }
+            CoopRuntime.LogSource?.LogInfo($"[MissionSync] GenerateMission fired entities={entCount} useFixedSeed={ufix} fixedSeed={fseed} pending={OpenNestCoop.GameSync.MissionSync.PendingSeed}");
             if (OpenNestCoop.Net.AutoJoin.WantNewSync) { SyncV2.MissionSyncV2.ApplyPendingSeedTo(__instance); return; }
             MissionSync.ApplyPendingSeedTo(__instance);
+            int fseed2 = -1;
+            try { fseed2 = (int)__instance.fixedSeed; } catch { }
+            CoopRuntime.LogSource?.LogInfo($"[MissionSync] GenerateMission after-apply fixedSeed={fseed2} entities={entCount}");
         }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony PreFireMissionGenerate: {ex.Message}"); }
     }
@@ -592,6 +704,180 @@ public static class HarmonyPatches
     {
         try { TeleprinterSync.OnLocalClearAlarm(__instance); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony PostTeleprinterClearAlarm: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// ⚠️ 自定义任务诊断：State_TeleprinterText.OnEnter 执行现场（prefix，不拦截）。
+    /// ⚠️ 只用 __instance（State_TeleprinterText 具体类型），不带 __1（NodeExecutionState 嵌套参数
+    /// 会让 Harmony IL 编译失败/崩溃——已证）。确认节点被调、Text、打字机、EntityIDToReplace。
+    /// </summary>
+    private static void PreTeleprinterNodeEnter(SleepyNodes.State_TeleprinterText __instance)
+    {
+        try
+        {
+            string nid = "?";
+            try { nid = __instance?.NodeID ?? "?"; } catch { }
+            string textInfo = "?";
+            try
+            {
+                var tv = __instance.Text;
+                textInfo = tv == null ? "(null)" : $"{tv.GetType().Name}/raw='{Truncate(tv.Raw)}'";
+            }
+            catch (System.Exception ex) { textInfo = "err(" + ex.Message + ")"; }
+            string printer = "?";
+            string printerFound = "?";
+            try
+            {
+                var p = __instance.Printer;
+                printer = p.ToString();
+                try { printerFound = Teleprinter.GetTeleprinter(p) != null ? "FOUND" : "null"; }
+                catch (System.Exception pe) { printerFound = "err(" + pe.Message + ")"; }
+            }
+            catch (System.Exception ex) { printer = "err(" + ex.Message + ")"; }
+            string alarm = "?";
+            try { alarm = __instance.AlarmState.ToString(); } catch { }
+            // ⚠️ 关键：EntityIDToReplace 是否为 null（OnEnter 遍历它做实体名替换 → null NRE）
+            string entityInfo = "?";
+            try
+            {
+                var el = __instance.EntityIDToReplace;
+                entityInfo = el == null ? "(null)" : $"List[{el.Count}]";
+            }
+            catch (System.Exception ee) { entityInfo = "err(" + ee.Message + ")"; }
+            CoopLog.Debug("mission.diag", () => $"[MissionDiag] State_TeleprinterText.OnEnter node='{nid}' text={textInfo} printer='{printer}' getPrinter={printerFound} alarm='{alarm}' onlyQueue={__instance.OnlyQueue} wait={__instance.WaitUntilComplete} entityIDs={entityInfo}");
+            // ⚠️ 自定义任务 token 替换：原生 OnEnter 对 ImportMission 图可能不调 ProcessBlock（token 不替换）。
+            // 对【自定义图】的 TeleprinterText，若 Text 含 '<' token，手动 ProcessBlock 替换（[GRID <turret>] → 铁巢坐标、
+            // [POINT <实体>] → 实体位置），设回 Text → OnEnter 打印替换后的文本。原生任务不受影响（IsNativeCustomGraph 守卫）。
+            try
+            {
+                var mm = MissionManager.Instance;
+                var cur = mm?.CurrentMission;
+                if (cur != null && OpenNestCoop.GameSync.OncMissionBridge.IsNativeCustomGraph(cur))
+                {
+                    if (__instance?.Text != null && __instance.Text.Raw != null && __instance.Text.Raw.IndexOf('<') >= 0)
+                    {
+                        var raw = __instance.Text.Raw;
+                        var results = FireMissionTokenProcessor.ProcessBlock(raw);
+                        if (results != null && results.Count > 0)
+                        {
+                            var sb = new System.Text.StringBuilder();
+                            for (int li = 0; li < results.Count; li++)
+                            {
+                                if (sb.Length > 0) sb.Append('\n');
+                                try { sb.Append(results[li] ?? ""); } catch { }
+                            }
+                            var joined = sb.ToString();
+                            if (joined != raw)
+                            {
+                                try
+                                {
+                                    __instance.Text = new Localisation.TextIdentifier(joined);
+                                    CoopLog.Debug("mission.diag", () => $"[MissionDiag] TokenReplace node='{nid}' BEFORE='{Truncate(raw, 80)}' AFTER='{Truncate(joined, 160)}'");
+                                }
+                                catch (System.Exception se) { CoopLog.Debug("mission.diag", () => $"[MissionDiag] TokenReplace node='{nid}' set error: {se.Message}"); }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[MissionDiag] PreTeleprinterNodeEnter: {ex.Message}"); }
+    }
+
+    /// <summary>诊断：State_SpawnMapEntity.OnEnter 执行现场（prefix 只读，不拦截）——确认生成节点是否被图驱动。</summary>
+    private static void PreSpawnNodeEnter(SleepyNodes.State_SpawnMapEntity __instance)
+    {
+        try
+        {
+            string nid = "?";
+            try { nid = __instance?.NodeID ?? "?"; } catch { }
+            string eid = "?";
+            try { eid = __instance?.ID ?? "?"; } catch { }
+            string n = "?", r = "?", hp = "?", z = "?";
+            try { n = __instance?.NumberToSpawn.ToString(); } catch { }
+            try { r = __instance?.Role.ToString(); } catch { }
+            try { hp = __instance?.Health.ToString(); } catch { }
+            try { if (__instance?.LocationToSpawn != null) z = __instance.LocationToSpawn.ZoneID ?? "?"; } catch { }
+            CoopLog.Debug("mission.diag", () => $"[MissionDiag] State_SpawnMapEntity.OnEnter node='{nid}' id='{eid}' num={n} role={r} hp={hp} zone='{z}'");
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[MissionDiag] PreSpawnNodeEnter: {ex.Message}"); }
+    }
+
+    /// <summary>捕获 SubmitLines 的 waitForTrigger 参数（玩家靠近才打印的开关）+ lines 内容（看 token 是否替换）。</summary>
+    private static void PreTeleprinterSubmitCapture(Teleprinter __instance, string __0, object __1, object __2, bool __3)
+    {
+        try
+        {
+            string content = "?";
+            try
+            {
+                // __1 = IEnumerable<string> lines；读首行看 token 是否已替换
+                var ie = __1 as System.Collections.IEnumerable;
+                if (ie != null)
+                {
+                    var en = ie.GetEnumerator();
+                    if (en.MoveNext())
+                    {
+                        var first = en.Current;
+                        content = first == null ? "(null)" : Truncate(first.ToString(), 100);
+                    }
+                    else content = "(empty lines)";
+                }
+                else content = "(not-enumerable)";
+            }
+            catch { }
+            CoopLog.Debug("tp.capture", () => $"[TPCapture] SubmitLines ptype={__instance?.TeleprinterType} sourceId='{__0}' waitForTrigger={__3} first='{content}'");
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[TPCapture] SubmitLines: {ex.Message}"); }
+    }
+
+    /// <summary>捕获 TryStart 调用（启动打印动画）+ 打字机状态（IsPrinting/revealed/队列）。</summary>
+    private static void PreTeleprinterTryStartCapture(Teleprinter __instance, bool __0)
+    {
+        try
+        {
+            string from = "?"; try { from = new System.Diagnostics.StackTrace().GetFrame(2)?.GetMethod()?.Name; } catch { }
+            string st = "?";
+            try
+            {
+                bool ip = __instance.IsPrinting;
+                int rv = 0; try { rv = __instance._currentRevealedCharIndex; } catch { }
+                string rich = ""; try { rich = __instance._currentFullRich ?? ""; } catch { }
+                st = $"isPrinting={ip} revealed={rv} richLen={rich.Length}";
+            }
+            catch { }
+            CoopLog.Debug("tp.capture", () => $"[TPCapture] TryStart ptype={__instance?.TeleprinterType} ignoreInitialDelay={__0} caller={from} {st}");
+        }
+        catch { }
+    }
+
+    /// <summary>捕获 RunQueue 协程启动（逐字打印循环）。</summary>
+    private static void PreTeleprinterRunQueueCapture(Teleprinter __instance)
+    {
+        try
+        {
+            string from = "?"; try { from = new System.Diagnostics.StackTrace().GetFrame(2)?.GetMethod()?.Name; } catch { }
+            CoopLog.Debug("tp.capture", () => $"[TPCapture] RunQueue ptype={__instance?.TeleprinterType} caller={from}");
+        }
+        catch { }
+    }
+
+    /// <summary>捕获 ResumeCurrentJob 协程（玩家靠近后恢复打印）。</summary>
+    private static void PreTeleprinterResumeCapture(Teleprinter __instance)
+    {
+        try
+        {
+            string from = "?"; try { from = new System.Diagnostics.StackTrace().GetFrame(2)?.GetMethod()?.Name; } catch { }
+            CoopLog.Debug("tp.capture", () => $"[TPCapture] ResumeCurrentJob ptype={__instance?.TeleprinterType} caller={from}");
+        }
+        catch { }
+    }
+
+    private static string Truncate(string s, int max = 80)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return s.Length <= max ? s : s.Substring(0, max) + "…";
     }
 
     // ---------------- 玩家-猫交互事件（软同步） ----------------

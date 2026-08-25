@@ -1,0 +1,28 @@
+{
+  "Id": "sample.killwave",
+  "DisplayName": "击退三波（示例）",
+  "Description": "地图实体样板：依次生成 3 个敌人 → 等待被摧毁 → 推进击杀目标 → 全部击杀后完成。纯新增任务。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Seed": 54321,
+  "Objectives": [
+    { "Id": "kills", "Title": "击杀 3 个目标", "Description": "摧毁全部生成的目标", "Type": "destroy", "Target": 3 }
+  ],
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "第一波敌军接近！", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Objective", "ObjectiveId": "kills", "ObjectiveAction": "Start", "To": ["s1"] },
+    { "Id": "s1", "Kind": "SpawnEntity", "EntityId": "sample_enemy_1", "EntityName": "敌方步兵", "X": 8, "Y": 5, "Health": 50, "Armour": 0, "Role": "Enemy", "To": ["w1"] },
+    { "Id": "w1", "Kind": "WaitEntityDestroyed", "EntityId": "sample_enemy_1", "To": ["k1"] },
+    { "Id": "k1", "Kind": "Objective", "ObjectiveId": "kills", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["s2"] },
+    { "Id": "s2", "Kind": "SpawnEntity", "EntityId": "sample_enemy_2", "EntityName": "敌方步兵", "X": 12, "Y": 6, "Health": 60, "Armour": 0, "Role": "Enemy", "To": ["w2"] },
+    { "Id": "w2", "Kind": "WaitEntityDestroyed", "EntityId": "sample_enemy_2", "To": ["k2"] },
+    { "Id": "k2", "Kind": "Objective", "ObjectiveId": "kills", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["s3"] },
+    { "Id": "s3", "Kind": "SpawnEntity", "EntityId": "sample_enemy_3", "EntityName": "敌方装甲", "X": 10, "Y": 8, "Health": 100, "Armour": 5, "Role": "Enemy", "To": ["w3"] },
+    { "Id": "w3", "Kind": "WaitEntityDestroyed", "EntityId": "sample_enemy_3", "To": ["k3"] },
+    { "Id": "k3", "Kind": "Objective", "ObjectiveId": "kills", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["done"] },
+    { "Id": "done", "Kind": "ObjectiveComplete", "ObjectiveId": "kills", "To": ["end"] },
+    { "Id": "end", "Kind": "Print", "Message": "三波全部击退！", "To": ["e2"] },
+    { "Id": "e2", "Kind": "End" }
+  ]
+}

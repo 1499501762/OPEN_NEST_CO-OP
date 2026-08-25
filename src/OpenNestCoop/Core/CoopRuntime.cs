@@ -28,10 +28,12 @@ public static class CoopRuntime
 
     private static bool _started;
 
-    /// <summary>入口壳在 Load/OnInitializeMelon 时调用：注入平台日志（同时供 OpenNestCore.CoopLog 使用）。</summary>
+    /// <summary>入口壳在 Load/OnInitializeMelon 时调用：注入平台日志（同时供 OpenNestCore.CoopLog 使用）。
+    /// ⚠️ 2026-08-26：把 LogSource 包一层 <see cref="RoutingLogger"/>——同步模块大量 `LogSource?.LogInfo("[XSync] ...")`
+    /// 直调绕过 CoopLog key 路由，混进主日志刷屏；RoutingLogger 按消息前缀自动路由到独立文件（sync.log）。</summary>
     public static void Initialize(ILogger logger)
     {
-        LogSource = logger;
+        LogSource = new OpenNestCore.Logging.RoutingLogger(logger);
         OpenNestCore.Logging.CoopLog.SetLogSource(logger);
     }
 
@@ -42,6 +44,9 @@ public static class CoopRuntime
         _started = true;
 
         LogSource?.Info($"{NetConfig.Name} v{NetConfig.Version} started (platform-agnostic core). Steam running: {Steamworks.SteamAPI.IsSteamRunning()}");
+
+        // 独立文件日志：诊断/联机日志 → frame/net/sync 独立 .log（主日志安静 → 控制台不刷屏 → 帧性能提升）
+        InitFileLogs();
 
         Net = new NetManager();
         Net.Init();
@@ -56,6 +61,15 @@ public static class CoopRuntime
         AddComponent<CoopUIManager>();
         ClassInjector.RegisterTypeInIl2Cpp<Debug.InteractableNameTool>();
         AddComponent<Debug.InteractableNameTool>();
+        // 网络诊断 UI：NetworkGovernor 分级/参数/采样 + NetLagSim 模拟配置（F9 循环内显示）
+        ClassInjector.RegisterTypeInIl2Cpp<Debug.NetworkGovernorDebugUI>();
+        AddComponent<Debug.NetworkGovernorDebugUI>();
+        // 帧性能诊断菜单：FPS/帧时间 + 每模块 CPU 开销（FrameProfiler 统计；F9 循环内显示）
+        ClassInjector.RegisterTypeInIl2Cpp<Debug.FrameDiagUI>();
+        AddComponent<Debug.FrameDiagUI>();
+        // 诊断菜单循环切换器（F9）：不显示→帧→网络→交互→不显示 循环（替代 F7/F8/F9 独立按键）
+        ClassInjector.RegisterTypeInIl2Cpp<Debug.DiagCycleController>();
+        AddComponent<Debug.DiagCycleController>();
 
         // Harmony 补丁（M2：炮塔输入/开火同步）
         HarmonyPatches.Apply();
@@ -71,15 +85,73 @@ public static class CoopRuntime
         // 提前触发 Animator 化身 AssetBundle 异步加载（本地 file:// 帧内完成，玩家加入时通常已就绪）
         AnimatorAvatarVisualProvider.Instance.TryLoad();
 
+        // 自定义任务：从外部游戏目录 CSM 文件夹按文件名序读取 JSON 任务/战役并注册（文件夹不存在则静默跳过）
+        try { OpenNestCoop.GameSync.OncMissionBridge.LoadFromGameFolder(); }
+        catch (System.Exception ex) { LogSource?.LogWarning($"[CoopRuntime] OncMission LoadFromGameFolder: {ex.Message}"); }
+
         // 游戏原生 UI 桥接（OpenNestCore.UI.NativeUi）：本地化/通知/ESC/主菜单/光标能力抽象，供模组平台无关调用
         IronNestNativeUi.Hook();
 
         LogSource?.Info($"local player: {Net.Local?.Name} (SteamID {Net.Local?.SteamId})");
     }
 
+    /// <summary>独立文件日志初始化 + 路由注册（诊断/联机日志 → frame/net/sync 独立 .log，主日志只留会话/错误）。
+    /// 文件目录：游戏目录/OpenNestLogs。写入用 ModLog 缓冲批量落盘（1s 间隔），性能好。</summary>
+    private static void InitFileLogs()
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(System.Environment.CurrentDirectory, "OpenNestLogs");
+            OpenNestCore.Logging.ModLog.Init(dir);
+        }
+        catch { }
+        // 帧/网络诊断 → 独立文件
+        CoopLog.RouteToFile("frame", "frame");  // FrameDiagUI LogDump / 帧诊断
+        CoopLog.RouteToFile("net.", "net");     // NetworkGovernor 调控（net.governor）/ net.diag
+        CoopLog.RouteToFile("Net.", "net");     // NetManager 网络日志（Net.stats10s/Net.recvBatch/Net.flush/...）
+        // 落点/照片诊断 → sync（HarmonyPatches ImpactDiag/PhotoDiag；key=impact.diag/photo.diag）
+        CoopLog.RouteToFile("impact.", "sync");
+        CoopLog.RouteToFile("photo.", "sync");
+        // ⚠️ 2026-08-26：.Charge Dial 值源诊断（HarmonyPatches PostDialValueChanged）→ sync
+        CoopLog.RouteToFile("chargedial.", "sync");
+        // 联机同步模块 → sync 文件（主日志/控制台不刷屏 → 帧性能提升）
+        string[] sync = {
+            "CatSync","SyncV2","ControlSync","ValueSync","Teleprinter","Requisition",
+            "GunLinkSync","PunchcardSync","RecordItemSync","MapMarkerSync","ChargeButtonSync",
+            "ChargeInventorySync","MissionSync","MissionEventSync","EntitySync","ReloadSync",
+            "CounterBattery","ReconPhoto","SequenceSync","HatchSync","ShellSync","CoffeeSync",
+            "ArmSync","CylinderActionSync","PurchaseSync","MapTokenSync","NotificationSync",
+            "RecordPlayerSync","StateSnapshot","ButtonClickSync",
+        };
+        foreach (var p in sync) CoopLog.RouteToFile(p, "sync");
+        // ⚠️ 2026-08-26：RoutingLogger（LogSource 直调兜底）同步前缀路由——同源 sync 数组 + 直调消息前缀补充，
+        // 把 `LogSource?.LogInfo("[XSync] ...")` 直调也路由到 sync.log（主日志不再刷屏）。
+        // ⚠️ 消息前缀 ≠ 模块 key：直调用 `[XSync]` 文本前缀，按实际消息补齐（Impact/MissionEvent/Purchase/Notification 等）。
+        string[] syncMsgPrefix = {
+            "CatSync","SyncV2","ControlSync","ValueSync","Teleprinter","Requisition",
+            "GunLinkSync","PunchcardSync","RecordItemSync","MapMarkerSync","ChargeButtonSync",
+            "ChargeInventorySync","MissionSync","MissionEventSync","EntitySync","ReloadSync",
+            "CounterBattery","ReconPhoto","SequenceSync","HatchSync","ShellSync","CoffeeSync",
+            "ArmSync","CylinderActionSync","PurchaseSync","MapTokenSync","NotificationSync",
+            "RecordPlayerSync","StateSnapshot","ButtonClickSync",
+            // ⚠️ 直调消息前缀补充（模块 key 可能是 XxxSync，但 LogSource 直调用 [Xxx] 短名）
+            "ImpactSync","Impact","MissionEvent","Mission","Purchase","PurchaseV2","Notification",
+            "MapSync","M3Env","M3EnvV2","TurretSync","PlayerSync","PlayerSyncV2","XSync",
+            "CatSyncV2","CoffeeSyncV2","MissionSyncV2","PunchcardSyncV2","RecordItemSyncV2",
+            "ReloadSyncV2","RecordPlayerSyncV2","MapMarkerSyncV2","HatchSyncV2","GunLinkSyncV2",
+            "SequenceSyncV2","ShellSyncV2","MapTokenSyncV2","TeleprinterSyncV2",
+        };
+        foreach (var p in syncMsgPrefix) OpenNestCore.Logging.RoutingLogger.RouteToFile(p, "sync");
+    }
+
     /// <summary>注册 V1（旧方案）全部同步模块——默认方案。--sync new 时不调用。</summary>
     private static void RegisterLegacyModules()
     {
+        // ⚠️ 2026-08-25：炮弹落点同步（MsgType=13）——提前注册（排最前，避免被后续模块构造异常/顺序问题阻断注册）
+        CoopSyncRegistry.RegisterModule(new ImpactSync());
+        // ⚠️ 2026-08-26：铁巢（TurretController）位置同步（MsgType=146，主机权威，对齐 Synchrony NestMoveBridge）——
+        // 铁巢位置两端一致 → 追踪器/落点/打字机 [GRID <turret>] 等依赖铁巢基准的功能一致
+        CoopSyncRegistry.RegisterModule(new NestSync());
         CoopSyncRegistry.RegisterModule(new CoffeeSync());
         CoopSyncRegistry.RegisterModule(new MissionSync());
         // 中途加入快照容器（MsgType=30）：收集各模块快照打包，新成员收到后分发应用

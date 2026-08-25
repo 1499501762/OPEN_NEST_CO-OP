@@ -1,0 +1,22 @@
+{
+  "#sym": { "SceneName": "Mission tutorial 4" },
+  "Id": "sample.defend",
+  "DisplayName": "坚守阵地（示例）",
+  "Description": "顺序流程样板：打印任务简报 → 开始目标（坚守 300 秒）→ 计时 → 完成。纯新增任务，不修改原任务。",
+  "SceneName": "#sym:SceneName",
+  "Seed": 12345,
+  "Card": { "X": 0, "Y": 0, "TitleColor": "#FFFFFF", "Background": "#29343F" },
+  "Objectives": [
+    { "Id": "survive", "Title": "坚守 5 分钟", "Description": "存活 300 秒", "Type": "survive", "Target": 300 }
+  ],
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "任务简报：敌军接近，坚守阵地 5 分钟！", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Notify", "Title": "任务开始", "Message": "守住防线！", "Duration": 5, "To": ["n4"] },
+    { "Id": "n4", "Kind": "Objective", "ObjectiveId": "survive", "ObjectiveAction": "Start", "To": ["n5"] },
+    { "Id": "n5", "Kind": "WaitSeconds", "Seconds": 300, "To": ["n6"] },
+    { "Id": "n6", "Kind": "ObjectiveComplete", "ObjectiveId": "survive", "To": ["n7"] },
+    { "Id": "n7", "Kind": "Notify", "Title": "任务完成", "Message": "坚守成功！", "Duration": 6, "To": ["n8"] },
+    { "Id": "n8", "Kind": "End" }
+  ]
+}

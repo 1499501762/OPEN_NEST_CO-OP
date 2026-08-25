@@ -67,7 +67,7 @@ public static class CoopLoc
 
     // ---------------- 语言键 ----------------
 
-    public static string MenuToggle => T("联机菜单", "Co-op Menu");
+    public static string MenuToggle => T("联机菜单", "Coop Menu"); // 左上角开关 + 主菜单/ESC 入口共用（2026-08-23 统一，英文 "Coop Menu"）
     public static string Title => T("Open Nest 联机", "Open Nest Co-op");
     public static string DefaultRoomName => T("Nest 联机房间", "Nest Co-op Room");
     public static string State => T("状态", "State");
@@ -127,4 +127,6 @@ public static class CoopLoc
     public static string ClientBadge => T("客户端", "CLIENT");
     public static string Standby => T("待机", "standby");
     public static string Online => T("联机中", "online");
+    // 联机大厅面板右上角关闭按钮（CoopUIManager 用）
+    public static string Close => T("关闭", "Close");
 }

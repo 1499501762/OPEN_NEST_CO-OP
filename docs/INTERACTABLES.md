@@ -9,6 +9,7 @@
 > 同步归属来自 `src/OpenNestCoop/GameSync/*.cs` 当前实现（V1 活代码）。
 >
 > **更新记录**：
+> - 2026-08-26 修复"开局状态不正常"（Locking Lever Rotation/Elevation 乱转 + 引擎停电）：①`Aiming Console/` 下 Locking Lever 视觉角度由 `transform.localEulerAngles` 表示（accumulatedValue 恒 0 非视觉值）——ControlSync 值源改读 `localEulerAngles.y`、set 直接设旋转（对端 Lever 角度一致）；②`env/engine/running` 加 SkipFull 排除 ControlFull 全量广播（只走状态变化广播，避免主机开局 getter 误读 false 覆盖客机关引擎）。
 > - 2026-08-22 建表
 > - 2026-08-22 加入 F9/F10 实测路径；修订：不存在方向角锁止拉杆；仰角锁止 = `Wheel Blocker`/`Handle Blocker`（Interactable 非 LookAtTarget）；
 >   `Starter Chain` 非必须同步；`Delete button` 归属仰角计算单；新增引擎扳手轮 `.Dial core`、`CatInterruption`、`SaftySwitch (4)`、

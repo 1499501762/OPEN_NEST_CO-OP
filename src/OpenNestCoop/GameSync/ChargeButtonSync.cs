@@ -73,7 +73,7 @@ public sealed class ChargeButtonSync : ISyncedModule
             var data = NetProtocol.Snapshot(w);
             foreach (var p in net.Roster)
                 if (!p.IsLocal) net.Transport.Send(p.SteamId, data, true);
-            CoopRuntime.LogSource?.LogInfo($"[ChargeButtonSync] host broadcast masks=[{sig}]");
+            CoopLog.Debug("ChargeButtonSync.masks", () => $"[ChargeButtonSync] host broadcast masks=[{sig}]");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ChargeButtonSync Tick: {ex.Message}"); }
     }

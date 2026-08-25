@@ -19,6 +19,8 @@ namespace OpenNestCoop.SyncV2;
 /// </summary>
 public sealed class EntitySyncV2 : ISyncedModule
 {
+    /// <summary>高频任务实体状态 → 容忍丢失，全局降频时优先降（per-module 分级）。</summary>
+    public NetModulePriority NetPriority => NetModulePriority.Low;
     public static EntitySyncV2 Instance { get; } = new EntitySyncV2();
 
     private EntitySyncV2() { }

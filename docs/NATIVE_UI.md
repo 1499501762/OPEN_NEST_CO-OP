@@ -10,6 +10,9 @@
 > **更新记录**：
 > - 2026-08-23 建档：原生 UI 研究 + `OpenNestCore.UI` 抽象（INativeUiService + NativeUi + UiKit）+ 游戏侧桥接 IronNestNativeUi。
 > - 2026-08-23 原生 UI 图集（sprite）复现：全盘确认游戏**无 UI AssetBundle**（仅 player.bundle）→ 走"自打包 ui.bundle + UiSpriteBank"路线；Core 新增 `UiSpriteBank`（经 AssetBundleIron 加载 Sprite）+ `UiKit.MakePanel/MakeButton(bgSprite:)`。
+> - 2026-08-23 主菜单联机入口：patch 原生主菜单程序化脚本（`MainMenuStateRelay.HandleMainMenuLoaded`）→ 设置菜单 Apply 按钮右侧 + ESC 菜单"设置"按钮下方注入"联机"入口按钮（`UI/MainMenuEntry.cs`，自建抄模板样式，避免克隆带链接脚本）；联机大厅面板标题栏右侧加"关闭"按钮。详见第七节。
+> - 2026-08-23 主菜单联机入口迭代（最终）：ESC 菜单重排为**10 按钮统一间距 38 / 按钮高 38 / 字号固定 20 + 强制关 autoSizing / 加粗（抄 fontStyle）/ 内边距照抄（20/10）**。修复 **slot 冲突 bug**（联机插入后所有后续按钮必须整体让位，否则挤同格/间距错乱——先后踩过两版：联机=Feedback 同格、Feedback=BUG 同格）；**模板按钮按名精确选**；**字号"忽大忽小"根因=autoSizing**（抄某按钮 autoSizing=true 会被按钮尺寸缩放文字，强制关 autoSizing + 固定字号解决）；诊断日志全部降级 `CoopLog.Debug`。详见第七节。
+> - 2026-08-23 主菜单联机入口：入口按钮文字改用 `CoopLoc.Entry` 语言键（**联机菜单/Coop Menu**，与左上角开关 `MenuToggle` 同义），"关闭"按钮改用 `CoopLoc.Close`；**MainMenuEntry 注入前必须 `CoopLoc.Refresh()`**（CoopLoc 只在 CoopUIManager.Rebuild 刷新，主菜单注入时可能未刷新 → 按钮恒中文）；**左上角开关语言实时跟随**（CoopUIManager.Start 先 Refresh + Update 1s 节流检测语言变化更新文字）。
 > - 关联文档：`docs/OPEN_NEST_CORE.md`（Core API）、`docs/INTERACTABLES.md`（世界内可交互实体——与"屏幕 UI"不同范畴）。
 
 ---
@@ -188,3 +191,52 @@ var input = UiKit.MakeInputField(canvas.transform, "", 10, 60, 300, 40, 15); // 
 - ✅ 原生路线 Core 侧已实现：`UiSpriteBank.FromResources/PrefabFromResources/CollectSprites/CaptureFromScene/CopySprite/NativeGet` + `IronNestNativeUi` 运行时验证钩子 + 主菜单加载自动捕获（B2），双平台 0 错误。
 - ⏳ 待办：①双端实测主菜单自动捕获日志（`UiSpriteBank.capture captured 'UI Box ...'`）；②把模组菜单背景接线到捕获的 sprite（`UiKit.MakePanel(NativeGet("UI Box line"))` 等，CoopUIManager 共享文件需谨慎增量）。
 - `UiKit.MakeImage/MakeButton/MakeInputBox` 默认仍是**纯色**（无 sprite 时退回）。
+
+---
+
+## 七、主菜单联机入口（MainMenuEntry，2026-08-23）
+
+**目标**：在**游戏原生主菜单/ESC 菜单**里加入"联机"入口按钮（点击打开 `CoopUIManager` 联机大厅），
+获得原生观感（复用原生按钮样式/字体/过渡），而不是只靠自建 Canvas 的左上角小开关。
+
+**实现**：
+- `src/OpenNestCoop/UI/MainMenuEntry.cs`（静态类）+ `Patches/HarmonyPatches.cs` 注册
+  `TryPatch(typeof(MainMenuStateRelay), "HandleMainMenuLoaded", postfix: PostMainMenuLoaded)`——
+  原生主菜单加载完成的权威时机（也可订阅 `MissionManager.MainMenuLoaded` public 事件，等价）。
+- 注入点：
+  - **设置菜单**：全场景找名字含 `Apply` 的按钮（`SGButtonPrimaryUGUI (apply)`），每个**右侧**注入联机入口
+    （抄模板尺寸/样式，与应用按钮并列）。
+  - **ESC 菜单**：全场景找 `ESC Menu Buttons` 容器（多实例），在**"设置"按钮（OpenSettingsBtn）下方**注入联机入口，
+    并重排全部按钮为**统一间距 38 / 按钮高 38**（10 个按钮 slot 0..9，从最高按钮 Wishlist 向下连续排列，不盖标题、不挤出底部）。
+    联机按钮与原生按钮**同款字体（CourierPrime）/ 字号固定 20 + 强制关 autoSizing / 加粗（抄 fontStyle）/ 内边距照抄（20/10）**，视觉完全融入菜单。
+- 按钮**自建 + 抄模板样式**（不 `Instantiate` 克隆——克隆会带原生链接脚本/onClick 持久绑定，点击跳愿望单等副作用）：
+  抄模板主按钮 Image（跳过 `SUGShadowLite` 阴影层，取 `Bg` 的 `UI Box Castile`）+ `Button` 过渡 +
+  文字**字体/字号/颜色**（模板字体优先，不用 `ApplySharedFont` 覆盖——否则字体换成本地化字体导致字形/大小不一致）。
+  入口按钮文字走 `CoopLoc.Entry` 语言键（`CoopLoc.cs`：联机/Online，跟随游戏语言），非硬编码。
+- `CoopUIManager` 新增 `public static ToggleMenu()`（供入口按钮调用）；联机大厅面板标题栏右侧新增"关闭"按钮。
+
+**关键坑（都踩过）**：
+1. **ESC 菜单多实例**：主菜单（root=`Barbet`）与游戏内暂停菜单（root=`Main Camera`）是**两个** `ESC Menu Buttons`——
+   只注入选中的主菜单 Canvas 会漏掉用户实际按 ESC 看到的那个。必须**全场景** `FindObjectsOfType` 遍历所有实例。
+2. **主菜单 Canvas 选择**：按 sortingOrder 会选中虚拟光标层（`Cursor Canvas` sort=32767）；应排除 `Cursor`/
+   `OpenNestCoop` 前缀，优先按钮多 + WorldSpace（主菜单是 `Barbet` 场景的 WorldSpace Canvas）。
+3. **ESC 容器可能 inactive**（主菜单加载时未打开）：注入后要 `SetActive(true)`，否则随 inactive 父级不可见。
+4. **容器 sizeDelta 不可靠**（实测 `ESC Menu Buttons` sizeDelta=(100,100) 只是参考值）：按钮实际按 `anchoredPosition`
+   布局，不能依赖 sizeDelta 算缩放。
+5. **IL2CPP 下 `foreach(Transform)` 枚举子物体不可靠**：用 `GetComponentsInChildren<Transform>`（数组）匹配名字。
+6. **`UI Box Castile` Sliced 边框**：border(18,34,18,16) 上下合计 50px，按钮高必须 ≥50px 否则 9-slice 四角挤压
+   （`pixelsPerUnitMultiplier` 在 IL2CPP 下无效，无法靠它缩边框）。
+7. **slot 冲突（联机插入后所有后续按钮必须整体让位）**：重排时联机插在"设置"按钮之后，它之后**每一个**原生按钮的
+   slot 都要 +1。只让第一个按钮让位、或联机与某原生按钮同格，都会让两个按钮 y 相同 → 完全重叠/间距错乱
+   （先后踩过两版：联机=Feedback 同格、Feedback=BUG 同格）。正确写法：`entryPlaced` 之后统一 `slot = idx + 1`。
+8. **字号别乱降，按钮高度要匹配**：联机文字必须与原生**同字号（25）+ 同款字体**才能融入菜单。若按钮高低于原生
+   （如 34 vs 40），同字号文字占比过大 → 视觉"字大"（用户误报"字号大"）。把按钮高提到接近原生（38）即可，
+   别靠降字号"补偿"——会造成与原生"不一样大"。
+9. **诊断日志已降级**：布局探测/重排前后打印等均为 `CoopLog.Debug`（Release 默认静默），`Info` 只保留注入位置/
+   注入完成等运行摘要。排障时设 `CoopLog.Level = Debug` 或 Debug 构建看全量。
+10. **模板按钮必须按名精确选**：`GetComponentsInChildren` 返回顺序不可依赖（用户反馈"抄的可能不是设置按钮导致尺寸不对"）。
+    按名三级回退选模板（精确 `OpenSettingsBtn` → 含 `Settings` → 第一个），并 Info 打印所选模板名核对。
+11. **字号"忽大忽小"根因 = autoSizing（最终 2026-08-23）**：抄某按钮的 `enableAutoSizing=true` 时，TMP 会按按钮尺寸
+    把字号**自动缩小**（如 20 → 更小 → 用户觉得"过小"）；抄 25 又偏大。各按钮字号/autoSizing 不统一 → **正确做法：
+    字号固定 20 + 强制 `enableAutoSizing=false`**（不抄任何按钮）。**加粗**：原生按钮文字是 **Bold**，须抄模板 `fontStyle`
+    （默认 Normal 细体）。垂直内边距照抄模板（20/10）。25 偏大 / 20 正常（实测结论）。

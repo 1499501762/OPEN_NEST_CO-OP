@@ -24,10 +24,11 @@ public enum MsgType : byte
     CounterBattery = 15, // 主机 -> 全员：反炮兵事件（落点/侦察 seed 走 ISyncedModule 100+）
     // ---- 合包容器 ----
     Batch = 120,        // 外层容器：多个不可靠状态子包合并（省 Steam 每包头）
+    Fragment = 122,     // ⚠️ 2026-08-26：大包通用分片容器（Steam P2P 单包硬性限制）——超阈值子包自动切段重组。
+    // ⚠️ 不能用 121：GunLinkSync 已占用 121。122 空闲（121=GunLink,130=MissionEvent,131=Notification）。
     // ---- M2.6：玩家化身 ----
-    PlayerPos = 16      // 客户端 -> 主机 -> 其他客户端：玩家世界位置/朝向（unreliable 连续值）
-    ,   PlayerState = 33 // 玩家离散状态标记（空中/蹲下/冲刺 + 俯仰）——必须 reliable（丢失会卡状态），变化才发
-    ,
+    PlayerPos = 16,      // 客户端 -> 主机 -> 其他客户端：玩家世界位置/朝向（unreliable 连续值）
+    PlayerState = 33, // 玩家离散状态标记（空中/蹲下/冲刺 + 俯仰）——必须 reliable（丢失会卡状态），变化才发
     // ---- M2.8：唱片机/播放器 ----
     RecordState = 17,   // 主机 -> 全员：唱片机播放状态（isPlaying/trackIndex/音量）
     RecordCmd = 18,     // 客户端 -> 主机：唱片机本地变化上行
@@ -42,47 +43,45 @@ public enum MsgType : byte
     // ---- M3c：实时交互同步 ----
     ControlState = 25,  // 主机 -> 全员：控件值（刻度盘/旋钮/曲柄/滑块：kind+path+value）
     ControlCmd = 26,    // 客户端 -> 主机：本地控件变化上行
-    MapMarkerUpdate = 27 // 客户端 -> 主机 -> 全员：地图标记实时拖拽位置（id+origin+tip）
-    ,
-    ReloadAdvance = 28 // 任意端 -> 全员：装填推进/回退事件（gunIndex + dir）
-    ,
-    PowderEvent = 29 // 任意端 -> 全员：发射药事件（gunIndex + ev(1=选药量,2=投放) + chargeIndex）
-    ,
-    StateSnapshot = 30 // 主机 -> 新加入者：中途加入全量状态容器（方案 B：状态注册表）
-    ,
-    SnapshotRequest = 31 // 客机 -> 主机：任务场景加载完成后请求补发快照
-    ,    Kick = 32 // 主机 -> 被踢成员：踢出/封禁（reliable）
-    ,    CatEvent = 133 // 任意端 -> 全员：玩家-猫交互事件（1=拾起 2=放下 3=驱赶 4=抚摸）
-    ,
+    MapMarkerUpdate = 27, // 客户端 -> 主机 -> 全员：地图标记实时拖拽位置（id+origin+tip）
+    ReloadAdvance = 28, // 任意端 -> 全员：装填推进/回退事件（gunIndex + dir）
+    PowderEvent = 29, // 任意端 -> 全员：发射药事件（gunIndex + ev(1=选药量,2=投放) + chargeIndex）
+    StateSnapshot = 30, // 主机 -> 新加入者：中途加入全量状态容器（方案 B：状态注册表）
+    SnapshotRequest = 31, // 客机 -> 主机：任务场景加载完成后请求补发快照
+    Kick = 32, // 主机 -> 被踢成员：踢出/封禁（reliable）
+    CatEvent = 133, // 任意端 -> 全员：玩家-猫交互事件（1=拾起 2=放下 3=驱赶 4=抚摸）
     // ---- SyncV2 分层新方案（MsgType ≥200，独立段，不与现有 1-32/100+/120/131/133/134 重叠）----
     // 路由走 CoopSyncRegistry.TryRoute（各层实现 ISyncedModule），无需在此 switch 分发。
     V2Event = 200,   // EventLayer：泛型事件广播 + 对端复现（MsgType=200）
     V2Value = 201,   // ValueLayer：值同步（MsgType=201）
     V2Button = 202,  // ButtonLayer：按钮/交互控件状态（MsgType=202）
-    V2HostData = 203 // HostDataLayer：主机权威数据层全量快照（中途加入/基线对齐，MsgType=203）
-    ,   V2Control = 204 // ControlSyncV2：控件发现层（仅 Tick 驱动，无自身网络消息，占位保留）
-    ,   V2Player = 205 // PlayerSyncV2：玩家位置/朝向同步（Operator 权威，10Hz+死区，星型中继）
-    ,   V2Entity = 206 // EntitySyncV2：任务实体状态同步（Host 权威，客机聚合上行→主机广播）
-    ,   V2Cat = 207 // CatSyncV2：猫 AI 状态软同步（Host 权威，held 上行；交互事件走 EventLayer 200）
-    ,   V2Record = 208 // RecordPlayerSyncV2：唱片机状态（谁操作谁变更，经主机传播）
-    ,   V2ReloadState = 209 // ReloadSyncV2：装填状态快照（Host 权威，主机→全员）
-    ,   V2ReloadCmd = 210 // ReloadSyncV2：装填状态上行（客机→主机）
-    ,   V2ReloadSnapshotReq = 214 // ReloadSyncV2：客机进入炮台场景后请求补发装填快照（客机→主机）
-    ,   V2ReconPhoto = 215 // ReconPhotoSyncV2：侦察照片 seed 广播（Host 权威）
-    ,   V2Coffee = 216 // CoffeeSyncV2：咖啡机冲煮状态（Host 权威）
-    ,   V2CounterBattery = 217 // CounterBatterySyncV2：反炮兵落点 seed 广播（Host 权威）
-    ,   V2RecordItem = 218 // RecordItemSyncV2：唱片物品位置（Host 权威）
-    ,   V2Shell = 219 // ShellSyncV2：弹舱弹种（Host 权威，变化+心跳）
-    ,   V2Sequence = 220 // SequenceSyncV2：发射台开关序列（谁变化谁广播，OnLateJoin 快照）
-    ,   V2Hatch = 221 // HatchSyncV2：舱门/楼梯盖板 IsOpen（谁变化谁广播，OnLateJoin 快照）
-    ,   V2MapToken = 222 // MapTokenSyncV2：战术令牌位置/朝向/active（谁变化谁广播，OnLateJoin 快照）
-    ,   V2Purchase = 223 // PurchaseSyncV2：补给购买事件（Host 权威，客机请求→主机执行→广播）
-    ,   V2Punchcard = 224 // PunchcardSyncV2：征信点卡牌位置/状态（Host 权威）
-    ,   V2PunchcardSlot = 225 // PunchcardSyncV2：卡牌入槽/出槽事件（Operator）
-    ,   V2MapMarker = 226 // MapMarkerSyncV2：战术地图标记/画线（事件驱动+擦除检测，OnLateJoin 快照）
-    ,   V2Mission = 227 // MissionSyncV2：任务 scene/phase/seed（Host 权威，OnLateJoin 快照）
-    ,   V2Teleprinter = 228 // TeleprinterSyncV2：打字机打印/状态/清除（Host 权威）
-    ,   V2GunLink = 229 // GunLinkSyncV2：仰角联动/锁定插销 isLinked（谁变化谁广播，主机中继）
+    V2HostData = 203, // HostDataLayer：主机权威数据层全量快照（中途加入/基线对齐，MsgType=203）
+    V2Control = 204, // ControlSyncV2：控件发现层（仅 Tick 驱动，无自身网络消息，占位保留）
+    V2Player = 205, // PlayerSyncV2：玩家位置/朝向同步（Operator 权威，10Hz+死区，星型中继）
+    V2Entity = 206, // EntitySyncV2：任务实体状态同步（Host 权威，客机聚合上行→主机广播）
+    V2Cat = 207, // CatSyncV2：猫 AI 状态软同步（Host 权威，held 上行；交互事件走 EventLayer 200）
+    V2Record = 208, // RecordPlayerSyncV2：唱片机状态（谁操作谁变更，经主机传播）
+    V2ReloadState = 209, // ReloadSyncV2：装填状态快照（Host 权威，主机→全员）
+    V2ReloadCmd = 210, // ReloadSyncV2：装填状态上行（客机→主机）
+    V2ReloadSnapshotReq = 214, // ReloadSyncV2：客机进入炮台场景后请求补发装填快照（客机→主机）
+    V2ReconPhoto = 215, // ReconPhotoSyncV2：侦察照片 seed 广播（Host 权威）
+    V2Coffee = 216, // CoffeeSyncV2：咖啡机冲煮状态（Host 权威）
+    V2CounterBattery = 217, // CounterBatterySyncV2：反炮兵落点 seed 广播（Host 权威）
+    V2RecordItem = 218, // RecordItemSyncV2：唱片物品位置（Host 权威）
+    V2Shell = 219, // ShellSyncV2：弹舱弹种（Host 权威，变化+心跳）
+    V2Sequence = 220, // SequenceSyncV2：发射台开关序列（谁变化谁广播，OnLateJoin 快照）
+    V2Hatch = 221, // HatchSyncV2：舱门/楼梯盖板 IsOpen（谁变化谁广播，OnLateJoin 快照）
+    V2MapToken = 222, // MapTokenSyncV2：战术令牌位置/朝向/active（谁变化谁广播，OnLateJoin 快照）
+    V2Purchase = 223, // PurchaseSyncV2：补给购买事件（Host 权威，客机请求→主机执行→广播）
+    V2Punchcard = 224, // PunchcardSyncV2：征信点卡牌位置/状态（Host 权威）
+    V2PunchcardSlot = 225, // PunchcardSyncV2：卡牌入槽/出槽事件（Operator）
+    V2MapMarker = 226, // MapMarkerSyncV2：战术地图标记/画线（事件驱动+擦除检测，OnLateJoin 快照）
+    V2Mission = 227, // MissionSyncV2：任务 scene/phase/seed（Host 权威，OnLateJoin 快照）
+    V2Teleprinter = 228, // TeleprinterSyncV2：打字机打印/状态/清除（Host 权威）
+    V2GunLink = 229, // GunLinkSyncV2：仰角联动/锁定插销 isLinked（谁变化谁广播，主机中继）
+    ControlFull = 145 // ValueSync 向量全量同步包（主机权威低频：整体签名变化才发全量绑定值，reliable 覆盖式应用）
+    ,   NestMove = 146 // ⚠️ 2026-08-26：铁巢（TurretController）位置同步——主机权威，patch MoveTurret/SetTurretLocation
+    //  广播位置（对齐 Synchrony NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
 }
 
 public static class NetProtocol

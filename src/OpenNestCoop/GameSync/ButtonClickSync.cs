@@ -242,6 +242,19 @@ public sealed class ButtonClickSync : ISyncedModule
         }
     }
 
+    /// <summary>IL2CPP 对象身份比较：同一原生对象可能被包装成不同托管实例（ReferenceEquals/== 在 IL2CPP
+    /// interop 下不可靠，BepInEx 端每次 Il2CppObjectPool.Get 新包装）→ 用原生指针比较。
+    /// ⚠️ 2026-08-25 崩溃修复：ReferenceEquals 防环失效 → ApplyClick 复现 OnClickDown 时防环不生效
+    /// → 两端互转点击 → 无限递归 → 栈溢出（异常 0xc00000fd，G 端 BepInEx 启动/联机崩）。</summary>
+    public static bool SameTarget(LookAtTarget a, LookAtTarget b)
+    {
+        if (a == null || b == null) return false;
+        if (ReferenceEquals(a, b)) return true; // 快路径（同包装实例）
+        try { if (a.Pointer != IntPtr.Zero && b.Pointer != IntPtr.Zero) return a.Pointer == b.Pointer; } catch { }
+        try { return a.gameObject.GetInstanceID() == b.gameObject.GetInstanceID(); } catch { }
+        return false;
+    }
+
     /// <summary>本地 LookAtTarget.OnClickDown 被调用（Harmony patch）→ 若为受跟踪按钮则广播点击。</summary>
     public static void OnLocalClick(LookAtTarget t)
     {
@@ -249,7 +262,7 @@ public sealed class ButtonClickSync : ISyncedModule
         {
             // 对象级防环：只有正在复现**同一个** target 时才跳过（防环）；
             // 玩家此时点击其他拉杆（装药拉杆快速连点）正常广播，不吞事件。
-            if (ApplyingTarget != null && t != null && ReferenceEquals(t, ApplyingTarget)) return;
+            if (SameTarget(t, ApplyingTarget)) return;
             var net = CoopRuntime.Net;
             if (net == null || t == null) return;
             if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;

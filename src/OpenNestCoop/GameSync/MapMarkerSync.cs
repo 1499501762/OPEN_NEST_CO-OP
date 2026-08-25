@@ -25,6 +25,22 @@ public sealed class MapMarkerSync : ISyncedModule
     private static readonly Dictionary<string, GameObject> _markers = new();
     // 远端拖拽中的临时 marker（kind -> GameObject）
     private static readonly Dictionary<string, GameObject> _dragMarkers = new();
+    // ⚠️ 2026-08-26 帧性能：MapMarkerPlacer 引用缓存（避免每 0.3s DetectLocalErase / 拖拽每帧
+    // FindFirstObjectByType 全场景扫描——frame.log MapMarkerSync 13-17ms/s 大头）。场景切换/丢失刷新。
+    private static MapMarkerPlacer _placerCache;
+    private static int _placerScene = -1;
+
+    /// <summary>MapMarkerPlacer 引用缓存（场景切换/丢失刷新，避免高频全场景 Find）。</summary>
+    private static MapMarkerPlacer GetPlacer()
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        if (_placerCache == null || sc != _placerScene)
+        {
+            _placerCache = UnityEngine.Object.FindFirstObjectByType<MapMarkerPlacer>();
+            _placerScene = sc;
+        }
+        return _placerCache;
+    }
 
     public static void EnsureHook()
     {
@@ -58,7 +74,7 @@ public sealed class MapMarkerSync : ISyncedModule
         if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;
         try
         {
-            var placer = UnityEngine.Object.FindFirstObjectByType<MapMarkerPlacer>();
+            var placer = GetPlacer();
             if (placer == null || placer.currentMarkerUI == null || placer.currentMarkerUI != marker) return; // 只在拖拽中
             float now = Time.unscaledTime;
             if (now - _lastDragSend < 0.1f) return;
@@ -142,7 +158,7 @@ public sealed class MapMarkerSync : ISyncedModule
             // 兜底：marker 还在但已不在 placedMarkers（游戏用 SetActive(false)/移除方式擦除）→ 也视为擦除
             var ui = go.GetComponent<MapMarkerLineUI>();
             if (ui == null) { (gone ??= new List<string>()).Add(kv.Key); continue; }
-            var placer = UnityEngine.Object.FindFirstObjectByType<MapMarkerPlacer>();
+            var placer = GetPlacer();
             if (placer != null && placer.placedMarkers != null && !placer.placedMarkers.Contains(ui))
                 (gone ??= new List<string>()).Add(kv.Key);
         }
@@ -172,7 +188,7 @@ public sealed class MapMarkerSync : ISyncedModule
         {
             net.Transport.Send(net.HostSteamId, data, true);
         }
-        CoopRuntime.LogSource?.LogInfo($"[MapMarkerSync] erase broadcast id={id}");
+        CoopLog.Debug("MapMarkerSync.erase", () => $"[MapMarkerSync] erase broadcast id={id}");
     }
 
     /// <summary>对端应用删除：销毁 marker + 从 _markers/placedMarkers 移除（防环）。</summary>

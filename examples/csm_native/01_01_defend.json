@@ -1,0 +1,199 @@
+{
+  "SceneName": "Mission Chill",
+  "MissionID": "sample.defend",
+  "MissionName": "坚守阵地（示例）",
+  "MissionType": "Chill",
+  "MapImage": "",
+  "MapTopoImage": "",
+  "RequisitionPoints": 0,
+  "PowderCharges": 0,
+  "Zones": [
+    {
+      "ID": "Allied",
+      "Name": "Turret Spawn",
+      "Role": 2,
+      "ZoneShape": 0,
+      "BottomLeft": {
+        "Location": 44,
+        "X": 0,
+        "Y": 0
+      },
+      "Width": 10,
+      "Height": 10,
+      "Regions": []
+    },
+    {
+      "ID": "Enemy",
+      "Name": "Target Spawn",
+      "Role": 1,
+      "ZoneShape": 0,
+      "BottomLeft": {
+        "Location": 84,
+        "X": 0,
+        "Y": 0
+      },
+      "Width": 10,
+      "Height": 10,
+      "Regions": []
+    }
+  ],
+  "Nodes": {
+    "n1": {
+      "ID": "n1",
+      "NodeType": "State_Start",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "NodeID": "n1"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n1",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n2",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n2": {
+      "ID": "n2",
+      "NodeType": "State_TeleprinterText",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "Text": {
+          "Raw": "任务简报：敌军接近，坚守阵地 5 分钟！",
+          "Key": ""
+        },
+        "Printer": 0,
+        "OnlyQueue": false,
+        "WaitUntilComplete": false,
+        "AlarmState": "Low",
+        "NodeID": "n2"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n2",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n3",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n3": {
+      "ID": "n3",
+      "NodeType": "State_SendUINotification",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "Text_Title": {
+          "Raw": "任务开始",
+          "Key": ""
+        },
+        "Text_Description": {
+          "Raw": "守住防线！",
+          "Key": ""
+        },
+        "Duration": 5,
+        "NodeID": "n3"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n3",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n4",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n4": {
+      "ID": "n4",
+      "NodeType": "State_Objective",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "NodeID": "n4"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n4",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n5",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n5": {
+      "ID": "n5",
+      "NodeType": "State_WaitSeconds",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "Seconds": 5,
+        "NodeID": "n5"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n5",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n6",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n6": {
+      "ID": "n6",
+      "NodeType": "State_TestNode",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "NodeID": "n6"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n6",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n7",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n7": {
+      "ID": "n7",
+      "NodeType": "State_SendUINotification",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "Text_Title": {
+          "Raw": "任务完成",
+          "Key": ""
+        },
+        "Text_Description": {
+          "Raw": "坚守成功！",
+          "Key": ""
+        },
+        "Duration": 6,
+        "NodeID": "n7"
+      },
+      "Connections": [
+        {
+          "SourceNodeID": "n7",
+          "SourceFieldName": "To",
+          "DestinationNodeID": "n8",
+          "DestinationFieldName": "From"
+        }
+      ]
+    },
+    "n8": {
+      "ID": "n8",
+      "NodeType": "State_End",
+      "PosX": 0,
+      "PosY": 0,
+      "NodeData": {
+        "ForceSetState": false,
+        "NodeID": "n8"
+      },
+      "Connections": []
+    }
+  }
+}

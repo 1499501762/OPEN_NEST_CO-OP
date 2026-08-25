@@ -40,7 +40,7 @@ public sealed class CounterBatterySync : ISyncedModule
             {
                 _seed++;
                 UnityEngine.Random.InitState(_seed);
-                CoopRuntime.LogSource?.LogInfo($"[CounterBattery] host seed={_seed} broadcast");
+                CoopLog.Debug("CounterBattery.seed", () => $"[CounterBattery] host seed={_seed} broadcast");
                 BroadcastSeed(net, _seed);
             }
             else

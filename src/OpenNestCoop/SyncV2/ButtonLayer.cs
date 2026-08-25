@@ -125,7 +125,8 @@ public sealed class ButtonLayer : ISyncedModule
         try
         {
             // 对象级防环：只抑制正在复现的同一个 target；玩家此时点其他按钮不被吞（快速连点不丢事件）
-            if (ApplyingTarget != null && t != null && ReferenceEquals(t, ApplyingTarget)) return;
+            // ⚠️ 2026-08-25 崩溃修复：ReferenceEquals 在 IL2CPP interop 下不可靠 → 原生指针比较（同 ButtonClickSync）
+            if (OpenNestCoop.GameSync.ButtonClickSync.SameTarget(t, ApplyingTarget)) return;
             if (t == null || !Store.IsOnline) return;
             if (!ShouldTrack(t)) return;
             string id = PathOf(t.transform);

@@ -25,6 +25,8 @@ namespace OpenNestCoop.SyncV2;
 /// </summary>
 public sealed class ControlSyncV2 : ISyncedModule
 {
+    /// <summary>交互控件（关键操作）→ 全局降频时几乎不降。</summary>
+    public NetModulePriority NetPriority => NetModulePriority.Critical;
     public static ControlSyncV2 Instance { get; } = new ControlSyncV2();
 
     private ControlSyncV2()

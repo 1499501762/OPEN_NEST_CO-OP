@@ -72,7 +72,7 @@ public sealed class RecordItemSyncV2 : ISyncedModule
         }
         if (!any && _hostSig.Count > 0) return;
         net.EnqueueBatch(NetProtocol.Snapshot(w), true);
-        if ((++_sendLog % 15) == 1) CoopRuntime.LogSource?.LogInfo($"[RecordItemSyncV2] host send n={n} sig={_hostSig.Count}");
+        if ((++_sendLog % 15) == 1) CoopLog.Debug("RecordItemSyncV2.hostSend", () => $"[RecordItemSyncV2] host send n={n} sig={_hostSig.Count}");
     }
 
     private void ClientSendDropEvents(RecordItem[] items)

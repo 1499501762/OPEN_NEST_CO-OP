@@ -20,7 +20,9 @@ namespace OpenNestCoop.GameSync;
 public sealed class MapTokenSync : ISyncedModule
 {
     public byte MsgType => 119;
-    private const float Interval = 0.12f;
+    // ⚠️ 2026-08-26 帧性能：0.12s→0.3s（每 tick GameObject.Find + 遍历全部 token 读 TMP/路径/签名，
+    // 8.3Hz 全遍历是 frame.log MapTokenSync 22-37ms/s 大头；0.3s 仍够拖拽 token 实时跟随）
+    private const float Interval = 0.3f;
     private float _timer;
     private int _sendLog;
     private int _pathFrame;
@@ -28,10 +30,26 @@ public sealed class MapTokenSync : ISyncedModule
     private bool _fullOnce; // 首次全量对齐（连接后一次，之后只广播变化，避免周期覆盖静止 Token）
     private bool _debugDumped;
     private readonly System.Collections.Generic.Dictionary<string, string> _lastSig = new(); // token id -> sig
+    /// <summary>⚠️ 2026-08-26 帧性能：Draggable Surface 引用缓存（避免每 0.3s 全场景 GameObject.Find）——
+    /// 场景 buildIndex 变化 / 找不到（null）时刷新。</summary>
+    private GameObject _mapCache;
+    private int _mapScene = -1;
     /// <summary>Draggable Surface 下 Token 的"名字@路径"出现次数（判断是否多实例）——唯一实例不加
     /// childIndex，否则击杀标记在两端数量不同会导致后续 childIndex 偏移 → id 不同 → 单向/双向匹配失败。
     /// static：接收端 FindTokenById 也用（每帧 Tick 重建，两端场景布局一致 → 唯一性判断一致）。</summary>
     private static readonly Dictionary<string, int> _nameCount = new();
+
+    /// <summary>⚠️ 2026-08-26 帧性能：Draggable Surface 缓存（场景切换/丢失刷新，避免每 tick 全场景 Find）。</summary>
+    private GameObject GetMap()
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        if (_mapCache == null || sc != _mapScene)
+        {
+            _mapCache = GameObject.Find("Draggable Surface");
+            _mapScene = sc;
+        }
+        return _mapCache;
+    }
 
     public void Tick(float dt)
     {
@@ -44,7 +62,7 @@ public sealed class MapTokenSync : ISyncedModule
         if (_applying) return; // 正在应用远端，不检测本地（防环）
         try
         {
-            var map = GameObject.Find("Draggable Surface");
+            var map = GetMap();
             if (map == null) return;
             // 统计名字@路径出现次数（唯一性判断，供 TokenId 决定是否加 childIndex）
             BuildNameCount(map);
@@ -109,6 +127,17 @@ public sealed class MapTokenSync : ISyncedModule
                 scanned++;
                 string id = TokenId(t);
                 if (string.IsNullOrEmpty(id)) continue;
+                // ⚠️ 2026-08-26：铁巢 token（Player Turret Piece）是**可拖拽标记**，需同步（拖拽后两端一致）；
+                // 但**开局 forceFull 全量广播跳过它**——开局默认位置由游戏摆位（两端同 seed 天然一致，战术地图
+                // 场景加载后才摆到默认格）。广播"未摆位/摆位中"的初始位置 → 客机被同步到错误位置（"开局铁巢
+                // Token 直接出现在战术地图桌上"根因）。跳过时**必须记录 _lastSig[id]（当前签名）**——否则下一次
+                // Tick（非 forceFull）因 _lastSig 无记录而把铁巢 token 当前（摆位中间）位置判定为"变化"广播 →
+                // 对端初始化被移动。记录后只有**真正变化（玩家拖拽）**才广播。
+                if (forceFull && IsTurretPiece(t))
+                {
+                    _lastSig[id] = SigOf(t);
+                    continue;
+                }
                 string sig = SigOf(t);
                 if (!forceFull && _lastSig.TryGetValue(id, out var last) && last == sig) continue;
                 _lastSig[id] = sig;
@@ -258,7 +287,7 @@ public sealed class MapTokenSync : ISyncedModule
             var r = new NetDataReader(data);
             r.GetByte();
             int n = r.GetByte();
-            var map = GameObject.Find("Draggable Surface");
+            var map = GetMap();
             _applying = true;
             try
             {
@@ -293,9 +322,27 @@ public sealed class MapTokenSync : ISyncedModule
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"MapTokenSync OnPacket: {ex.Message}"); }
     }
 
+    /// <summary>是否铁巢 token（Player Turret Piece / 含 "Turret Piece"）——开局默认位置由游戏摆位，forceFull 跳过。</summary>
+    private static bool IsTurretPiece(Transform t)
+    {
+        try
+        {
+            string nm = t != null && t.name != null ? t.name : "";
+            if (nm.IndexOf("Turret Piece", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            // 兜底：路径含 Draggable Surface/Player Turret Piece
+            string p = t != null && t.transform != null ? PathOf(t.transform) : "";
+            if (p.IndexOf("Turret Piece", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        catch { }
+        return false;
+    }
+
     private static bool IsToken(Transform t)
     {
         string nm = t.name ?? "";
+        // ⚠️ 2026-08-26：铁巢 token（Player Turret Piece）**是** MapTokenSync 同步对象——它是可拖拽战术标记，
+        // 玩家拖拽后两端需一致。但**开局不广播**（见 Tick 的 forceFull 跳过）：开局默认位置由游戏摆位（两端
+        // 同 seed 天然一致），广播未摆位/摆位中位置会把对端开局状态覆盖掉（"开局铁巢 token 被错误移动"）。
         if (nm.IndexOf("MapToken", StringComparison.OrdinalIgnoreCase) >= 0) return true;
         if (nm.IndexOf("Token", StringComparison.OrdinalIgnoreCase) >= 0) return true;
         if (nm.IndexOf("Nest", StringComparison.OrdinalIgnoreCase) >= 0) return true;

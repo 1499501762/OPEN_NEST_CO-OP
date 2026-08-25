@@ -59,6 +59,8 @@ public sealed class ValueBinding
 /// </summary>
 public sealed class ValueLayer : ISyncedModule
 {
+    /// <summary>值同步（高频连续值，容忍丢失）→ 全局降频时优先降。</summary>
+    public NetModulePriority NetPriority => NetModulePriority.Low;
     public static ValueLayer Instance { get; } = new ValueLayer();
 
     private ValueLayer() { }
@@ -190,7 +192,9 @@ public sealed class ValueLayer : ISyncedModule
             // NoHeartbeat 且无变化时跳过（避免无操作反复应用触发动画/声音）。
             bool sendOnHeartbeat = heartbeat && !b.NoHeartbeat && Store.IsHost;
             if (!changed && !sendOnHeartbeat) continue;
-            SendValue(b, cur);
+            // ⚠️ E 分级（对齐 V1 ValueSync，2026-08-25）：高频（过程）→ unreliable；低频 + 心跳（结果/硬同步）→ reliable。
+            // 修复前所有值（含 2s 心跳全量）统一 unreliable → 心跳硬同步不可靠（用户原则：结果走 reliable 硬同步）。
+            SendValue(b, cur, heartbeat || !b.HighFreq);
             MarkLocal(b, cur);
         }
     }
@@ -243,7 +247,7 @@ public sealed class ValueLayer : ISyncedModule
 
     // ---------------- 内部 ----------------
 
-    private void SendValue(ValueBinding b, float v)
+    private void SendValue(ValueBinding b, float v, bool reliable)
     {
         var store = Store;
         // 主机侧镜像到 store（操作者权威：主机本地也记录；客机由接收路径 Apply）
@@ -255,7 +259,7 @@ public sealed class ValueLayer : ISyncedModule
             w.Put(b.Id ?? "");
             w.Put(v);
             w.Put(b.IsBusy != null && b.IsBusy() ? (byte)1 : (byte)0);
-        }, reliable: false);
+        }, reliable: reliable);
     }
 
     /// <summary>客户端插值逼近远端目标（Interpolate 绑定）。</summary>

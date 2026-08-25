@@ -78,7 +78,9 @@ public sealed class StateSnapshotSync : ISyncedModule
                 w.Put(name ?? "");
                 w.PutBytesWithLength(data); // 自带 ushort 长度前缀
             }
-            net.Transport.Send(steamId, NetProtocol.Snapshot(w), true);
+            // ⚠️ 2026-08-26：直发大包自动分片（Steam P2P 单包硬性限制）——中途加入快照（entity 35 实体等）
+            // 超过 900B 会整包被拒收/丢 → 客机缺实体/没类型。分片后接收端重组。
+            net.SendDirectFragmented(steamId, NetProtocol.Snapshot(w), true);
             CoopRuntime.LogSource?.LogInfo($"[StateSnapshot] → {steamId} modules={payloads.Count}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"StateSnapshotSync OnLateJoin: {ex.Message}"); }

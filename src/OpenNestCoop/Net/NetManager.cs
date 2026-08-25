@@ -64,8 +64,26 @@ public class NetManager
     // 发送端需提供低频 reliable 保底（心跳/全量）防长期丢失，最终对齐由保底负责。
     private readonly List<byte[]> _broadcastQueueU = new();
     private readonly List<byte[]> _hostQueueU = new();
-    private const int BatchMaxItems = 256;
+    // ⚠️ 合包上限由 NetworkGovernor 分级动态控制（High=256 与原 BatchMaxItems 一致）——
+    // 负载高（低档）→ 上限缩小 → 超限丢弃（RecordDrop 喂回评估器触发降频）。
     public bool IsHost => LocalMode ? (State == SessionState.Hosting) : Lobby.IsHost;
+
+    // ⚠️ 2026-08-26：通用大包分片（Steam P2P 单包硬性限制）——单子包超过阈值自动切成多段 Fragment，
+    // 接收端重组。Steam unreliable 单包 ~1200B / reliable 1MB 是硬限制，超过整包被拒收/丢。
+    // 分片阈值取 900B（留余量给 Batch 头 + 可靠包重传膨胀），确保任何单包安全。
+    private const int FragmentThreshold = 900;
+    private ushort _fragId; // 分片序号（发送端自增，接收端按 from+fragId 重组）
+    /// <summary>分片重组缓冲项（引用类型！值类型元组副本会导致 got 计数不写回字典 → 分片永不重组）。</summary>
+    private sealed class FragBuf
+    {
+        public int Total;
+        public byte[][] Segs;
+        public int Got;
+        public float First;
+    }
+    /// <summary>接收端分片重组缓冲：key=(from, fragId) → FragBuf。</summary>
+    private readonly System.Collections.Generic.Dictionary<(ulong from, ushort fragId), FragBuf> _fragBuf = new();
+    private float _fragCleanTimer;
     /// <summary>Steam 是否已初始化（游戏启动后由 Heathen 完成）。本地模式恒 true。</summary>
     public bool SteamReady;
 
@@ -223,10 +241,27 @@ public class NetManager
     /// <summary>本地模式本端 peerId（host=1，client=2）。</summary>
     private ulong LocalPeerIdOf() => (Transport as LocalTransport)?.LocalPeerId ?? 0;
 
+    /// <summary>帧性能剖析便捷（F7 诊断）：测量 action 耗时（ms）记入 <see cref="FrameProfiler"/>（按名归因）。</summary>
+    private static void Profile(string name, Action act)
+    {
+        if (act == null) return;
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { act(); }
+        finally
+        {
+            long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+            FrameProfiler.Instance.AddMs(name, (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+        }
+    }
+
     /// <summary>心跳 + 各同步模块 Tick + 合包 + 统计（Steam 与本地模式共用）。</summary>
     private void UpdateCommon(float dt)
     {
-        // 心跳/延迟
+        // ⚠️ 网络负载调控器（NetworkGovernor）：1s 采样评估 + 动态升降级。
+        // 模块频率按各自 NetPriority 精细化缩放（ModuleFreq）——关键模块几乎不降、高频容忍模块优先降。
+        Profile("NetworkGovernor", () => NetworkGovernor.Instance.Tick(dt));
+
+        // 心跳/延迟（用原始 dt——RTT 测量不能被频率缩放）
         _pingTimer += dt;
         if (_pingTimer >= NetConfig.PingInterval)
         {
@@ -241,6 +276,7 @@ public class NetManager
                     Transport.Send(p.SteamId, NetProtocol.Snapshot(w), false);
                     p.LastPingSentTicks = Environment.TickCount64;
                 }
+                NetworkGovernor.Instance.RecordPingSent();
             }
             else if (State == SessionState.Joined && HostSteamId != 0)
             {
@@ -249,6 +285,7 @@ public class NetManager
                 Transport.Send(HostSteamId, NetProtocol.Snapshot(w), false);
                 Local.LastPingSentTicks = Environment.TickCount64;
             }
+            NetworkGovernor.Instance.RecordPingSent();
         }
 
         // ---- 同步方案分支（--sync old|new）----
@@ -256,18 +293,39 @@ public class NetManager
         // 是 V1 专属：--sync new 时不跑，避免与 SyncV2 分层模块（CoopSyncRegistry 注册）双重同步/互踩。
         if (!OpenNestCoop.Net.AutoJoin.WantNewSync)
         {
-            PlayerSync.Tick(dt);        // 玩家化身同步（M2.6）
-            RecordPlayerSync.Tick(dt);  // 唱片机同步（M2.8）
-            ReloadSync.Tick(dt);        // 装填/开火同步（M3a）
-            MapSync.Tick(dt);           // 地图标记同步（M3b）
-            ControlSync.Tick(dt);       // 交互控件同步（M3c：曲柄/旋钮/滑块，含 ValueSync）
+            // ⚠️ per-module 网络分级：V1 硬编码模块按各自优先级缩放（关键交互几乎不降、高频容忍优先降）
+            // 帧性能剖析：每模块耗时记入 FrameProfiler（F7 诊断）
+            Profile("PlayerSync", () => PlayerSync.Tick(dt * NetworkGovernor.Instance.ModuleFreq(NetModulePriority.Critical)));       // 玩家化身（关键）
+            Profile("RecordPlayerSync", () => RecordPlayerSync.Tick(dt * NetworkGovernor.Instance.ModuleFreq(NetModulePriority.Low)));  // 唱片机（容忍丢失）
+            Profile("ReloadSync", () => ReloadSync.Tick(dt * NetworkGovernor.Instance.ModuleFreq(NetModulePriority.Critical)));        // 装填/开火（关键）
+            Profile("MapSync", () => MapSync.Tick(dt * NetworkGovernor.Instance.ModuleFreq(NetModulePriority.Normal)));                 // 地图标记
+            Profile("ControlSync", () => ControlSync.Tick(dt * NetworkGovernor.Instance.ModuleFreq(NetModulePriority.Critical)));       // 交互控件（含 ValueSync）
         }
 
-        // 自定义同步模块（V1 注册模块 / SyncV2 分层模块，开放扩展点）
-        CoopSyncRegistry.TickAll(dt);
+        // 自定义同步模块（V1 注册模块 / SyncV2 分层模块）——每模块按自己的 NetPriority 缩放（TickAll 内，并逐模块计时）
+        Profile("TickAll", () => CoopSyncRegistry.TickAll(dt));
 
-        // 帧末：合包发出不可靠状态包
-        FlushBatch();
+        // 帧末：合包发出不可靠状态包（计时）
+        Profile("FlushBatch", () => FlushBatch());
+
+        // ⚠️ 2026-08-26：周期清理过期分片缓冲（防内存泄漏——某端未收齐的 Fragment 段）
+        _fragCleanTimer += dt;
+        if (_fragCleanTimer >= 10f)
+        {
+            _fragCleanTimer = 0f;
+            try
+            {
+                if (_fragBuf.Count > 0)
+                {
+                    float now = UnityEngine.Time.realtimeSinceStartup;
+                    var stale = new System.Collections.Generic.List<(ulong, ushort)>();
+                    foreach (var kv in _fragBuf)
+                        if (now - kv.Value.First > 10f) stale.Add(kv.Key);
+                    foreach (var k in stale) _fragBuf.Remove(k);
+                }
+            }
+            catch { }
+        }
 
         // 每 10s 汇总收发统计（周期增量，打印后清零）
         _statsTimer += dt;
@@ -287,28 +345,157 @@ public class NetManager
         }
     }
 
+    /// <summary>关键消息类型（事件/交互/关键状态——边沿触发或影响一致性，丢失即不同步）。
+    /// 合包上限丢弃时保护这些类型（不丢）；只丢可重发的周期状态。</summary>
+    private static bool IsCriticalType(byte t)
+    {
+        switch (t)
+        {
+            case (byte)MsgType.TurretState:       // 炮塔状态
+            case (byte)MsgType.GunFire:           // 开火事件（直发，兜底保护）
+            case (byte)MsgType.Impact:            // 炮弹落点
+            case (byte)MsgType.ReloadState:       // 装填状态
+            case (byte)MsgType.ReloadCmd:         // 装填上行
+            case (byte)MsgType.FireRequest:       // 开火请求
+            case (byte)MsgType.ControlState:      // 控件状态广播（炮塔操作）
+            case (byte)MsgType.ControlCmd:        // 控件输入上行（操作者→主机）
+            case (byte)MsgType.MapMarkerAdd:
+            case (byte)MsgType.MapMarkerRemove:
+            case (byte)MsgType.MapMarkerClearAll:
+            case (byte)MsgType.MapMarkerUpdate:   // 战术标记增删改（事件）
+            case (byte)MsgType.ReloadAdvance:     // 装填推进/回退
+            case (byte)MsgType.PowderEvent:       // 发射药事件
+            case (byte)MsgType.CatEvent:          // 猫交互事件
+            case (byte)MsgType.V2Event:           // V2 事件层（泛型事件，谁操作谁发）
+            case (byte)MsgType.V2Button:          // V2 按钮/交互控件状态
+            case (byte)MsgType.V2ReloadCmd:       // V2 装填上行
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>把状态子包加入合包缓冲（toAll=true 广播给所有非本地，false 发主机）。
     /// reliable=false 走 unreliable 通道（容忍丢失的高频连续状态，减少 reliable 拥塞）——
-    /// 发送端必须提供低频 reliable 保底（心跳/全量广播）防长期丢失。默认 reliable 兼容现有调用。</summary>
+    /// 发送端必须提供低频 reliable 保底（心跳/全量广播）防长期丢失。默认 reliable 兼容现有调用。
+    /// ⚠️ 2026-08-26：单子包超过 <see cref="FragmentThreshold"/>（900B）自动切段（Fragment），
+    /// 接收端重组——Steam P2P 单包硬性限制（unreliable ~1200B / reliable 1MB）下大包必须拆小。</summary>
     public void EnqueueBatch(byte[] data, bool toAll, bool reliable = true)
     {
         if (data == null || data.Length == 0) return;
+        // ⚠️ 2026-08-26：大包自动分片（Steam P2P 单包硬性限制）——超阈值切成多段 Fragment 入队，接收端重组
+        if (data.Length > FragmentThreshold)
+        {
+            Fragmentize(data, seg => EnqueueRaw(seg, toAll, reliable));
+            return;
+        }
+        EnqueueRaw(data, toAll, reliable);
+    }
+
+    /// <summary>真正入队（EnqueueRaw）：单子包（含分片段）加入合包缓冲，帧末 FlushBatch 合并发出。
+    /// 分片段也走同一队列（合包），接收端 Batch 拆包后重组。</summary>
+    private void EnqueueRaw(byte[] data, bool toAll, bool reliable)
+    {
         try
         {
             int t = data[0] & 0xFF;
             if (t < 256) _sendStats[t]++;
+            // per-module 带宽占用：按 MsgType 归因入队字节（NetworkGovernor 诊断统计）
+            NetworkGovernor.Instance.RecordTypeBytes((byte)t, data.Length);
+            // ⚠️ 合包上限由 NetworkGovernor 分级动态控制：负载高（低档）→ 上限缩小 → 超限丢弃。
+            // 丢弃 = 负载过高信号（RecordDrop 喂回评估器 → 触发降频）；发送端 reliable 保底/心跳负责最终对齐。
+            // 注意：只有 reliable 丢弃算拥塞信号——unreliable 本身容忍丢失（Critical 档还会主动关闭），
+            // 若计入会误判拥塞 → 卡死在最低档无法回升。
+            int maxItems = NetworkGovernor.Instance.MaxBatchItems;
+            // ⚠️ 关键类型（事件/交互/装填/开火/落点等边沿触发，丢了永久不同步）**不参与合包上限丢弃**——
+            // 合包满时关键包仍入队（FlushBatch 拆包发出）；只丢可重发的周期状态。避免网络分级"吞关键包"导致
+            // 客机炮弹落点/装填/交互不同步。
+            bool critical = reliable && IsCriticalType((byte)t);
+            bool dropped = false;
             if (reliable)
             {
-                if (toAll) { if (_broadcastQueue.Count < BatchMaxItems) _broadcastQueue.Add(data); }
-                else { if (_hostQueue.Count < BatchMaxItems) _hostQueue.Add(data); }
+                if (toAll) { if (_broadcastQueue.Count < maxItems || critical) _broadcastQueue.Add(data); else dropped = true; }
+                else { if (_hostQueue.Count < maxItems || critical) _hostQueue.Add(data); else dropped = true; }
             }
             else
             {
-                if (toAll) { if (_broadcastQueueU.Count < BatchMaxItems) _broadcastQueueU.Add(data); }
-                else { if (_hostQueueU.Count < BatchMaxItems) _hostQueueU.Add(data); }
+                if (toAll) { if (_broadcastQueueU.Count < maxItems) _broadcastQueueU.Add(data); }
+                else { if (_hostQueueU.Count < maxItems) _hostQueueU.Add(data); }
+            }
+            if (dropped) NetworkGovernor.Instance.RecordDrop();
+        }
+        catch { }
+    }
+
+    /// <summary>大包切段：把 data 切成多段，每段构造 Fragment 子包 [Fragment][origType][fragId][total][index][payload]
+    /// （payload = 原始 data 不含首字节类型）。切完回调 <paramref name="enqueue"/>（入队发送）。
+    /// ⚠️ 2026-08-26：Steam P2P 单包硬性限制——unreliable ~1200B / reliable 1MB，超限整包拒收/丢。
+    /// 通用分片：任何模块的大包自动拆小，接收端重组后交给原模块（对模块透明）。</summary>
+    private void Fragmentize(byte[] data, Action<byte[]> enqueue)
+    {
+        try
+        {
+            int origType = data[0] & 0xFF;
+            int payloadLen = data.Length - 1; // 去掉首字节类型
+            int maxSeg = FragmentThreshold - 6; // 预留 Fragment 头（type+fragId 2B+total+index ≈ 6B）
+            if (maxSeg < 64) maxSeg = 64;
+            int total = (payloadLen + maxSeg - 1) / maxSeg;
+            if (total > 255) total = 255; // 防溢出
+            ushort fid = ++_fragId;
+            for (int i = 0; i < total; i++)
+            {
+                int off = i * maxSeg + 1; // +1 跳过类型字节
+                int len = Math.Min(maxSeg, data.Length - off);
+                var w = NetProtocol.Begin(MsgType.Fragment);
+                w.Put((byte)origType);
+                w.Put(fid);
+                w.Put((byte)total);
+                w.Put((byte)i);
+                w.Put(data, off, len);
+                enqueue(NetProtocol.Snapshot(w));
             }
         }
         catch { }
+    }
+
+    /// <summary>重组分片：收齐后拼回原始 data（首字节 origType + 各段 payload），递归 OnPacket 处理。</summary>
+    private bool ReassembleFragment(ulong from, byte[] data, out byte[] full)
+    {
+        full = null;
+        try
+        {
+            var r = new NetDataReader(data);
+            r.GetByte(); // 跳过 Fragment 类型
+            int origType = r.GetByte();
+            ushort fid = r.GetUShort();
+            int total = r.GetByte();
+            int index = r.GetByte();
+            if (total <= 0 || index < 0 || index >= total) return false;
+            var key = (from, fid);
+            if (!_fragBuf.TryGetValue(key, out var fb))
+            {
+                if (_fragBuf.Count > 128) { try { _fragBuf.Clear(); } catch { } } // 防无限增长
+                fb = new FragBuf { Total = total, Segs = new byte[total][], Got = 0, First = UnityEngine.Time.realtimeSinceStartup };
+                _fragBuf[key] = fb;
+            }
+            // 提取 payload（剩余全部字节）
+            int avail = r.AvailableBytes;
+            if (avail <= 0 || avail > 4096) return false;
+            var seg = new byte[avail];
+            System.Array.Copy(r.RawData, r.Position, seg, 0, avail);
+            // ⚠️ FragBuf 是引用类型：fb 即字典里的实例，修改直接生效（值类型元组副本曾导致 got 永不写回 → 永不重组）
+            if (fb.Segs[index] == null) { fb.Segs[index] = seg; fb.Got++; }
+            if (fb.Got < fb.Total) return false;
+            // 收齐：拼接
+            int len = 1;
+            for (int i = 0; i < fb.Total; i++) len += fb.Segs[i]?.Length ?? 0;
+            full = new byte[len];
+            full[0] = (byte)origType;
+            int pos = 1;
+            for (int i = 0; i < fb.Total; i++) { var s = fb.Segs[i]; if (s == null) return false; System.Array.Copy(s, 0, full, pos, s.Length); pos += s.Length; }
+            _fragBuf.Remove(key);
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>帧末把缓冲的子包合并成 Batch 包发出。
@@ -317,20 +504,26 @@ public class NetManager
     /// 仍按字节阈值拆包，避免单包过大（reliable 大包也会显著增加延迟/拥塞）。</summary>
     private void FlushBatch()
     {
-        const int MaxPacketBytes = 1000;
         try
         {
+            // ⚠️ 拆包阈值由 NetworkGovernor 分级动态控制（负载高 → 包更小 → 单包延迟/重传成本更低）
+            int maxPacketBytes = NetworkGovernor.Instance.MaxPacketBytes;
             if (_broadcastQueue.Count > 0)
             {
                 int subs = _broadcastQueue.Count, bytes = 0;
                 foreach (var d in _broadcastQueue) bytes += d.Length + 2;
                 if ((++_flushLog % 30) == 1)
-                    CoopLog.Info("Net.flush", () => $"[Net] flush toAll subs={subs} bytes≈{bytes} peers={Roster.Count - 1}");
-                foreach (var group in SplitBatches(_broadcastQueue, MaxPacketBytes))
+                    CoopLog.Debug("Net.flush", () => $"[Net] flush toAll subs={subs} bytes≈{bytes} peers={Roster.Count - 1}");
+                NetworkGovernor.Instance.RecordQueue(_broadcastQueue.Count);
+                foreach (var group in SplitBatches(_broadcastQueue, maxPacketBytes))
                 {
                     var (packetData, packetLen) = BuildBatch(group);
+                    // 模拟 Steam P2P 流量/单包限制：超限整组丢弃（日志节流）
+                    if (!NetLagSim.AllowSend(packetLen, true)) continue;
+                    int peers = 0;
                     foreach (var p in Roster)
-                        if (!p.IsLocal) Transport.Send(p.SteamId, packetData, packetLen, true);
+                        if (!p.IsLocal) { Transport.Send(p.SteamId, packetData, packetLen, true); peers++; }
+                    if (peers > 0) NetworkGovernor.Instance.RecordSent(packetLen * peers);
                 }
                 _broadcastQueue.Clear();
             }
@@ -339,11 +532,14 @@ public class NetManager
                 int subs = _hostQueue.Count, bytes = 0;
                 foreach (var d in _hostQueue) bytes += d.Length + 2;
                 if ((++_flushLog % 30) == 1)
-                    CoopRuntime.LogSource?.LogInfo($"[Net] flush toHost subs={subs} bytes≈{bytes}");
-                foreach (var group in SplitBatches(_hostQueue, MaxPacketBytes))
+                    CoopLog.Debug("Net.flushHost", () => $"[Net] flush toHost subs={subs} bytes≈{bytes}");
+                NetworkGovernor.Instance.RecordQueue(_hostQueue.Count);
+                foreach (var group in SplitBatches(_hostQueue, maxPacketBytes))
                 {
                     var (packetData, packetLen) = BuildBatch(group);
-                    if (HostSteamId != 0) Transport.Send(HostSteamId, packetData, packetLen, true);
+                    // 模拟 Steam P2P 流量/单包限制：超限整组丢弃（日志节流）
+                    if (!NetLagSim.AllowSend(packetLen, true)) continue;
+                    if (HostSteamId != 0) { Transport.Send(HostSteamId, packetData, packetLen, true); NetworkGovernor.Instance.RecordSent(packetLen); }
                 }
                 _hostQueue.Clear();
             }
@@ -351,24 +547,41 @@ public class NetManager
             // ⚠️ unreliable 消息只要任意分片丢失 → 整条全部丢弃（不会收到残缺版）。因此：
             //   ① 不合并成大 Batch（分片整条丢 + 连坐多个子包）——每个子包单独小包发送，互不影响；
             //   ② 单条超过安全阈值 → 降级 reliable 发送（保证送达，避免大 unreliable 分片整条丢）。
-            const int UnreliableMaxBytes = 1100; // 单条 unreliable 安全上限（远小于 Steam 上限 ~1200B / MTU，实际高频状态包仅几十 B）
-            if (_broadcastQueueU.Count > 0)
+            int unreliableMax = NetworkGovernor.Instance.UnreliableMaxBytes;
+            if (NetworkGovernor.Instance.AllowUnreliable)
             {
-                foreach (var d in _broadcastQueueU)
+                if (_broadcastQueueU.Count > 0)
                 {
-                    bool rel = d.Length > UnreliableMaxBytes;
-                    foreach (var p in Roster)
-                        if (!p.IsLocal) Transport.Send(p.SteamId, d, d.Length, rel);
+                    NetworkGovernor.Instance.RecordQueue(_broadcastQueueU.Count);
+                    int peers = 0;
+                    foreach (var d in _broadcastQueueU)
+                    {
+                        bool rel = d.Length > unreliableMax;
+                        // 模拟 Steam P2P 带宽/单包/丢包限制：拒绝则丢弃该条（unreliable 容忍丢失）
+                        if (!NetLagSim.AllowSend(d.Length, rel)) continue;
+                        foreach (var p in Roster)
+                            if (!p.IsLocal) { Transport.Send(p.SteamId, d, d.Length, rel); peers++; }
+                        NetworkGovernor.Instance.RecordSent(d.Length * peers);
+                    }
+                    _broadcastQueueU.Clear();
                 }
-                _broadcastQueueU.Clear();
+                if (_hostQueueU.Count > 0)
+                {
+                    foreach (var d in _hostQueueU)
+                    {
+                        bool rel = d.Length > unreliableMax;
+                        if (!NetLagSim.AllowSend(d.Length, rel)) continue;
+                        if (HostSteamId != 0) { Transport.Send(HostSteamId, d, d.Length, rel); NetworkGovernor.Instance.RecordSent(d.Length); }
+                    }
+                    _hostQueueU.Clear();
+                }
             }
-            if (_hostQueueU.Count > 0)
+            else
             {
-                foreach (var d in _hostQueueU)
-                {
-                    bool rel = d.Length > UnreliableMaxBytes;
-                    if (HostSteamId != 0) Transport.Send(HostSteamId, d, d.Length, rel);
-                }
+                // ⚠️ Critical（最低档）：unreliable 通道关闭——高频连续状态直接丢弃（发送端的
+                // reliable 保底/心跳负责最终对齐），最大化节省带宽、避免 unreliable 丢包干扰。
+                // 这是主动策略性丢弃，不计入 RecordDrop（否则误判拥塞 → 卡死在 Critical 无法回升）。
+                _broadcastQueueU.Clear();
                 _hostQueueU.Clear();
             }
         }
@@ -413,6 +626,19 @@ public class NetManager
             _batchWriter.Put(d, 0, len);
         }
         return (_batchWriter.Data, _batchWriter.Length);
+    }
+
+    /// <summary>直发大包（单播，不走合包队列）：超 <see cref="FragmentThreshold"/> 自动分片（Steam P2P 单包
+    /// 硬性限制）。StateSnapshot 中途加入快照 / ReloadSync 全量等直发路径用——避免大单播包被 Steam 拒收/丢。</summary>
+    public void SendDirectFragmented(ulong to, byte[] data, bool reliable)
+    {
+        if (to == 0 || data == null || data.Length == 0) return;
+        if (data.Length > FragmentThreshold)
+            Fragmentize(data, seg => { try { Transport.Send(to, seg, seg.Length, reliable); } catch { } });
+        else
+        {
+            try { Transport.Send(to, data, data.Length, reliable); } catch { }
+        }
     }
 
     // ---- 大厅操作 ----
@@ -837,7 +1063,7 @@ public class NetManager
             {
                 int n = r.GetByte();
                 if ((++_batchRecvLog % 20) == 1)
-                    CoopRuntime.LogSource?.LogInfo($"[Net] recv batch n={n} bytes={data.Length} from={from}");
+                    CoopLog.Debug("Net.recvBatch", () => $"[Net] recv batch n={n} bytes={data.Length} from={from}");
                 for (int i = 0; i < n; i++)
                 {
                     if (r.AvailableBytes < 2)
@@ -865,6 +1091,15 @@ public class NetManager
             {
                 CoopRuntime.LogSource?.LogWarning($"[Net] batch parse exception: {ex.Message} (bytes={data.Length} from={from})");
             }
+            return;
+        }
+
+        // ⚠️ 2026-08-26：大包分片重组（Steam P2P 单包硬性限制）——Fragment 子包先缓冲，收齐后重组为原始
+        // 数据再递归 OnPacket（对模块透明）。Batch 容器内拆出的 Fragment 子包也会走到这里。
+        if (type == MsgType.Fragment)
+        {
+            if (ReassembleFragment(from, data, out var full) && full != null)
+                OnPacket(from, full); // 递归处理重组后的原始包
             return;
         }
 
@@ -969,6 +1204,10 @@ public class NetManager
 
             case MsgType.ControlCmd:
                 ControlSync.OnCmd(from, data);
+                break;
+
+            case MsgType.ControlFull:
+                ControlSync.OnFullState(data);
                 break;
         }
     }
@@ -1157,7 +1396,12 @@ public class NetManager
         foreach (var s in Roster) if (s.SteamId == from) { session = s; break; }
         if (session == null) session = Local;
         if (session != null)
+        {
             session.PingMs = (float)(Environment.TickCount64 - ticks);
+            // 喂 RTT 给网络负载调控器（拥塞检测用）
+            NetworkGovernor.Instance.RecordRtt(session.PingMs);
+            NetworkGovernor.Instance.RecordPongRecv(); // 丢包率统计（Ping/Pong 探测）
+        }
     }
 
     private void OnChat(ulong from, NetDataReader r, byte[] raw)

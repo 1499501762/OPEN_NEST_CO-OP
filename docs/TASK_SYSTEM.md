@@ -13,6 +13,8 @@
 
 - 2026-08-23 初稿：依据 `tools/dump_Assembly-CSharp.txt` 全量核对 SleepyNodes 图引擎 / 任务类型 / 流程控制器 / 现有同步模块。
 - 2026-08-23 第六节映射更新为完整图模型（`OncNode`/`OncOperation`）；自定义任务框架见 `docs/CUSTOM_MISSION.md`。
+- 2026-08-25 五/六节更新：`MissionSync`/`MissionSyncV2` 广播增加 `@c:<MissionID>` 自定义任务前缀（防 scene 名撞原生卡片进错任务）+ 任务图当前节点 nodeId（同步序号）；Core `OncMissionSyncState` 补 `DoneNodeIds` + `OncMissionRuntime.ApplySyncState` 闭环 `BuildSyncState`。
+- 2026-08-25 客机不进任务修复：①`GetMissionId` 对 `'MissionBase'`（无区分度默认场景名）回退广播 `CurrentMission.MissionID`（客机可按 MissionID 匹配卡片）；②`TryLoadMissionScene` 移除直接调 `m.LoadMission`（MLL interop 签名不匹配 → Method not found），改用 `card.ActivateMission()`/`StartOperation`；③失败不再 `LoadMainMenu`/`EnterBrowsingMap`（避免拉回选任务界面，保持现状等主机保活重发）。
 
 ## 一、总览：任务是「节点图状态机」，不是「任务列表」
 
@@ -120,7 +122,7 @@
 
 | 模块 | MsgType | 同步内容 | 要点 |
 |---|---|---|---|
-| `MissionSync` | 102 | 任务标识 scene（`CurrentMissionSceneName`/`MissionID`）+ phase（GamePhase）+ 任务随机 seed | 主机权威；主机进任务生成固定 seed → 广播 → 客机 `FireMission.useFixedSeed/fixedSeed` 应用（两端随机一致）；客机 phase==2 → `TryLoadMissionScene`（优先 MapCard.ActivateMission） |
+| `MissionSync` | 102 | 任务标识（原生 scene 或 `MissionBase` 回退 `MissionID`；自定义任务为 `@c:<MissionID>` 前缀）+ phase（GamePhase）+ 任务随机 seed + 任务图当前节点 nodeId（同步序号） | 主机权威；主机进任务生成固定 seed → 广播 → 客机 `FireMission.useFixedSeed/fixedSeed` 应用（两端随机一致）；客机 phase==2 → `TryLoadMissionScene`：自定义 `@c:` → `OncMissionBridge.StartNative(id)`，原生优先 MapCard.ActivateMission/StartOperation（**不直接调 LoadMission**——MLL interop 签名不匹配 Method not found）；失败不跳选任务界面（等主机保活重发）；nodeId 广播任务图当前主执行线节点 |
 | `MissionEventSync` | 130 | 任务过渡事件：Finish(1)/Complete(2)/Failed(3)/Reload(4)/ReturnMap(5)/EndOperation(6) | Harmony patch `MissionManager` 6 方法，prefix 先上报再放行；对端 `Apply` 调同名方法；`IsApplying` 防环 |
 | `NotificationSync` | 131 | `UINotificationManager.ShowNotification` 事件（任务通知） | postfix 广播 title/desc/lifetime，对端复现 |
 | `TeleprinterSync` | 134 | 打字机打印/状态/清除事件 | 仅主机广播；客机本地打印抑制（详见 `TELEPRINTER_MISSION.md`） |
@@ -142,4 +144,4 @@ ReturnToMap/EndOperationAndReturnToMenu`、`FireMission.GenerateMission`（应�
 | `OperationGraph`/`MissionNode`/解锁链 | `OncOperation`/`OncMissionRef`/`OncMission.Requires` | 前置/后置任务 |
 | `ObjectiveGraph`/`ObjectiveStateNode` | `OncObjective` + 目标跟踪 | 目标子状态机 |
 | `MissionManager`/`MapCard`/`FireMission`/`Teleprinter`/`UINotificationManager` | `IOncMissionHost`（桥接契约）+ `OncMissionBridge`（游戏侧默认宿主） | 场景/打字机/通知/实体/奖励/seed |
-| 联机同步（`MissionSync`/`MissionEventSync`） | `OncMissionRuntime.BuildSyncState()`（同步序号） | 预留：序号 + 目标状态小负载，后续接网络 |
+| 联机同步（`MissionSync`/`MissionEventSync`） | `OncMissionRuntime.BuildSyncState()`/`ApplySyncState()`（同步序号） | Core 引擎任务闭环（`OncMissionSyncState` 含 `DoneNodeIds`/`ActiveNodeIds`/`Objectives`）；原生格式 CSM 走原生图，由 `MissionSync` 同步 scene/seed + 原生图当前节点 nodeId |

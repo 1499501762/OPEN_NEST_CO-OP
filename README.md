@@ -33,6 +33,7 @@ Also includes:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.0** (2026-08-26) | **Nest (turret) position sync** (host-authoritative `MoveTurret`/`SetTurretLocation`, aligned with the game's nest coordinate) — fixes trajectory display / shell impact / `[GRID]` teleprinter output; **entity type icons**; host-authoritative entity positions; **ControlSync delta-only broadcast** (revert ControlFull override, fix start-state desync); **Locking Lever skip-full**; **MapToken nest-token start-state fix** (no broadcast of un-placed position); network governor (bandwidth/queue tiers); NetLagSim packet/bandwidth/loss sim; frame diagnostics (FrameDiagUI); OpenNestCore `RoutingLogger` / `ModLog` |
 | **v0.1.9** (2026-08-23) | **Native CJK (real Chinese) input** via OS IME (`ImmGetCompositionStringW`), unified across lobby inputs + chat; reusable **CoopInputBox**; native UI kit (`OpenNestCore.UI` / `UiSpriteBank`); remembered lobby settings; **custom mission framework** (`OpenNestCore.Tasks`) |
 | **v0.1.8** | Event-decoupled reload/powder/arm/cylinder sync (PowderEvent / ArmSync / CylinderActionSync), charge-count fix, Button Dispenser mis-activation fix, direction angular-momentum dual channel, .Charge Dial two-way regression, 13 docs refreshed |
 | **v0.1.7** | FPS fix (EntitySync fallback throttle + ReloadSync 5s heartbeat + log throttle), missing-entity creation, reload-state desync fix (ApplySnapshot always SetState), Punchcard report dedup, Charge Dial early rescan |

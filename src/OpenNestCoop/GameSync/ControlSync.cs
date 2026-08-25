@@ -59,6 +59,10 @@ public static class ControlSync
         if (_logTimer >= 5f)
         {
             _logTimer = 0f;
+            // ⚠️ 2026-08-26 帧性能：诊断块（FindObjectsOfTypeAll 全场景扫描 ×3 + 遍历）在 Release 下
+            // CoopLog.Debug 只挡日志输出、**不挡扫描本身**——无条件执行 → ControlSync 85-105ms/s 大头。
+            // 加 level guard：Debug 关闭时整块跳过（零扫描）。诊断保留（Debug 构建/开 Debug 时可用）。
+            if (OpenNestCore.Logging.CoopLog.Level > OpenNestCore.Logging.LogLevel.Debug) return;
             string sample = "";
             int i = 0;
             // 诊断：打印方向角/Lever 相关注册控件（每 4 次 20s，避免刷屏）
@@ -81,7 +85,7 @@ public static class ControlSync
                 sample += (sample.Length > 0 ? " | " : "") + p;
                 i++;
             }
-            CoopLog.Info("ControlSync.registered", () => $"[ControlSync] registered={_registeredPaths.Count} sample=[{sample}]");
+            CoopLog.Debug("ControlSync.registered", () => $"[ControlSync] registered={_registeredPaths.Count} sample=[{sample}]");
             // 诊断：扫描场景里所有方向角/Lever/Bearing 相关控件（含未注册/被跳过的）——定位"方向角 Lever"对象。
             // 每 4 次（20s）一次，避免大段日志刷屏。
             if ((++_allLeverDiag % 4) == 1)
@@ -103,7 +107,7 @@ public static class ControlSync
                                 try { cav = cd.accumulatedValue; } catch { }
                                 try { cdr = cd.isDragging; } catch { }
                                 try { if (_registeredPaths.Contains(cp)) creg = "Y"; } catch { }
-                                CoopRuntime.LogSource?.LogInfo($"[ControlSync] charge-dial diag av={cav:0.###} drag={cdr} reg={creg} path='{cp}'");
+                                CoopLog.Debug("ControlSync.chargeDial", () => $"[ControlSync] charge-dial diag av={cav:0.###} drag={cdr} reg={creg} path='{cp}'");
                             }
                         }
                 }
@@ -240,6 +244,17 @@ public static class ControlSync
         // 方向角 Gear（Spur Gear 12 DRIVER）accumulatedValue 无限累积不同步——由专门注册的
         // DesiredRotation 状态同步覆盖（见后），这里跳过避免用累积值双向同步
         if (IsRotationGear(path)) return false;
+        // ⚠️ 2026-08-26：动态生成-过期控件（路径含 "(Clone)"，如 Requisition 放弹药卡片生成的
+        // ConsoleControl_Magazine Selection(Clone) 下 .Charge Dial）——每次重新生成是新实例，
+        // 但旧绑定（指向已销毁实例）残留 + Has(path) 防重 → 绑定不更新 → 拨动不同步。
+        // 修复：动态控件每次 OnEnable 强制移除旧绑定 + 重新注册（指向当前实例）。
+        // 场景静态控件（无 (Clone)）保留防重（OnEnable 可能多次触发但实例不变）。
+        if (path.IndexOf("(Clone)", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            if (ValueSync.Has(path)) ValueSync.Remove(path);
+            _registeredPaths.Remove(path);
+            _onEnablePaths.Remove(path);
+        }
         if (_registeredPaths.Contains(path) || ValueSync.Has(path)) return false;
         var dd = d;
         // ⚠️ 读取源用 小写 accumulatedValue（可读写 backing 属性）——大写 AccumulatedValue（只读）在 IL2CPP 下读恒 0（曲柄/转盘失效根因）
@@ -250,7 +265,14 @@ public static class ControlSync
         // 之前当 display-only 跳过值同步只走点击 → 对端 Lever 停在旧角度（"Lever 角度不同步"根因）。
         // 不用插值（避免持续拉向远端覆盖本地操作，同 Elevation Lever）；busy=isDragging（谁操作谁权威）。
         if (path.IndexOf("Locking Lever", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
             b.Interpolate = false;
+            // ⚠️ 2026-08-26：SkipFull——排除出 ControlFull 全量广播，只走变化广播（30Hz 拖拽 + 释放 settle 已覆盖）。
+            // Locking Lever 的 accumulatedValue 两端语义不同（同一视觉位置 av 0 vs 1，棘爪盘累积），
+            // ControlFull 全量覆盖会把主机 av 强加给客机 → Lever 视觉错位 + 引擎停电（EngineControls/Locking Lever
+            // 被覆盖到锁定位）。分片修复（2:35）让 ControlFull 真正到达后暴露——开局首次只记录不广播、变化才广播。
+            b.SkipFull = true;
+        }
         // 弹道计算机/装药摇杆（PowderChargeController 下）：跳过心跳（避免无操作时对端反复应用触发摇杆/压力声音循环）。
         // ⚠️ 2026-08-22：原 `Charge/Magazine` 关键词过宽——把补给界面的 `.Charge Dial`（ConsoleControl_Magazine Selection，
         //   动态生成，路径含 "Requisition Control"）也误判为 NoHeartbeat → 客机错过心跳补发 → 该拨杆不同步。
@@ -269,7 +291,7 @@ public static class ControlSync
             var pth = path;
             var dd2 = dd;
             // ⚠️ 2026-08-23 改 Info：确认 .Charge Dial 注册（客机单向不同步排查——值读取/注册状态）
-            CoopRuntime.LogSource?.LogInfo($"[ControlSync] reg charge-dial '{pth}' noHeartbeat={b.NoHeartbeat}");
+            CoopLog.Debug("ControlSync.regChargeDial", () => $"[ControlSync] reg charge-dial '{pth}' noHeartbeat={b.NoHeartbeat}");
         }
         _registeredPaths.Add(path);
         return true;
@@ -282,6 +304,13 @@ public static class ControlSync
         if (sp == null || sp.transform == null) return false;
         path = PathOf(sp.transform) + "/energy";
         if (string.IsNullOrEmpty(path) || path == "/energy") return false;
+        // ⚠️ 2026-08-26：动态生成-过期控件（路径含 "(Clone)"）强制重建绑定（同 RegisterDial——旧绑定指向已销毁实例）
+        if (path.IndexOf("(Clone)", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            if (ValueSync.Has(path)) ValueSync.Remove(path);
+            _registeredPaths.Remove(path);
+            _onEnablePaths.Remove(path);
+        }
         if (_registeredPaths.Contains(path) || ValueSync.Has(path)) return false;
         var ss = sp;
         ValueSync.AddFloat(path,
@@ -345,9 +374,12 @@ public static class ControlSync
             rv.HighFreq = true; // 30Hz 高频（方向角转速专用）
             rv.SenderWhenBusy = true; // 2026-08-23：转速单向（谁操作谁上行），非操作方不上行防干扰动量
             _registeredPaths.Add(rotVelId);
-            CoopRuntime.LogSource?.LogInfo($"[ControlSync] turret rotVel '{rotVelId}' reg (desiredRotationVelocity, SenderWhenBusy, HighFreq)");
+            CoopLog.Debug("ControlSync.regRotVel", () => $"[ControlSync] turret rotVel '{rotVelId}' reg (desiredRotationVelocity, SenderWhenBusy, HighFreq)");
             rv.Diag = () => $"[ControlSync] turret-rotVel diag vel={tt.desiredRotationVelocity:0.###} drag={IsRotationDragging(tt)}";
         }
+        // ⚠️ 2026-08-25：铁巢（炮台）位置同步（__turret/posX/Y/Z）已移除——它同步 TurretController.transform.position
+        // （战术地图炮塔图标），导致开局铁巢 Token 被强制设到主机位置/显示异常；落点现已由 ImpactSync 广播坐标，
+        // 不再依赖铁巢基准同步。炮塔图标位置两端天然一致（无需同步）。
         return true;
     }
 
@@ -360,6 +392,13 @@ public static class ControlSync
         if (string.IsNullOrEmpty(path)) return false;
         // 显示/从动型控件不注册（链条动画、坐标显示等）
         if (IsDisplayOnlyControl(path)) return false;
+        // ⚠️ 2026-08-26：动态生成-过期控件（路径含 "(Clone)"）强制重建绑定（同 RegisterDial——旧绑定指向已销毁实例）
+        if (path.IndexOf("(Clone)", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            if (ValueSync.Has(path)) ValueSync.Remove(path);
+            _registeredPaths.Remove(path);
+            _onEnablePaths.Remove(path);
+        }
         if (_registeredPaths.Contains(path) || ValueSync.Has(path)) return false;
         var ss = s;
         // 仰角物理拉杆（Elevation Lever Left/Right）：输入源，物理位置双向同步。
@@ -401,6 +440,8 @@ public static class ControlSync
 
     public static void OnCmd(ulong from, byte[] data) => ValueSync.OnCmd(from, data);
     public static void OnState(byte[] data) => ValueSync.OnState(data);
+    /// <summary>向量全量同步包（MsgType=145）：主机低频整体签名变化才发，reliable 覆盖式应用。</summary>
+    public static void OnFullState(byte[] data) => ValueSync.OnFullState(data);
 
     /// <summary>周期重扫场景控件（保底）：增量注册新控件，移除已销毁控件的绑定。
     /// detectMiss=true 时对"OnEnable 未覆盖、由本 Rescan 补注册"的控件记独立日志 onEnableMiss。</summary>
@@ -541,7 +582,7 @@ public static class ControlSync
                     // 打印 localEulerAngles 确认旋转轴/值，用于同步 Lever 物理倾斜。
                     string rot = "";
                     try { var lr = d.transform.localEulerAngles; rot = $"({lr.x:0.#},{lr.y:0.#},{lr.z:0.#})"; } catch { }
-                    CoopRuntime.LogSource?.LogInfo($"[ControlSync] dial-diag '{nm}' av={av:0.###} drag={drag} rot={rot}");
+                    CoopLog.Debug("ControlSync.dialDiag", () => $"[ControlSync] dial-diag '{nm}' av={av:0.###} drag={drag} rot={rot}");
                 }
             }
 

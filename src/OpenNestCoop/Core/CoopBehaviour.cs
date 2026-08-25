@@ -27,6 +27,9 @@ public class CoopBehaviour : MonoBehaviour
             // 用 unscaledDeltaTime：游戏切菜单/UI 暂停（timeScale=0）时同步不中断
             net?.Update(Time.unscaledDeltaTime);
 
+            // 独立文件日志批量落盘（1s 间隔缓冲写，性能好；诊断/联机日志 → OpenNestLogs/*.log）
+            OpenNestCore.Logging.ModLog.Flush(Time.unscaledDeltaTime);
+
             // 自定义任务桥接驱动（OpenNestCore.Tasks → 游戏宿主）：单机驱动自定义任务状态机
             try { OpenNestCoop.GameSync.OncMissionBridge.Update(Time.unscaledDeltaTime); }
             catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CoopBehaviour] OncMission Update: {ex.Message}"); }

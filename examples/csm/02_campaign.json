@@ -1,0 +1,9 @@
+{
+  "Id": "sample.campaign",
+  "DisplayName": "示例战役（前置/后置）",
+  "Description": "战役样板：包含 2 个任务引用；sample.killwave Requires sample.defend（defend 完成后才解锁 killwave）。演示 OncOperation + OncMissionRef。纯新增，不修改原任务。",
+  "Missions": [
+    { "MissionId": "sample.defend", "Requires": [] },
+    { "MissionId": "sample.killwave", "Requires": ["sample.defend"] }
+  ]
+}

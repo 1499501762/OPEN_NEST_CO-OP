@@ -260,8 +260,10 @@ public static class ReloadSync
             w.Put((byte)1); // 选药量
             w.Put((byte)Math.Max(chargeIndex, 0));
             var data = NetProtocol.Snapshot(w);
+            // ⚠️ 2026-08-26：改 reliable——快速连续选药量（拉多个装药拉杆）时 unreliable 丢包 → 主机没收到
+            // → 不广播 → 客机右炮装药拉杆没同步（用户反馈：Button Dispencer 主机拉快了客机右炮有一个没同步）。
             if (net.IsHost) net.EnqueueBatch(data, true);
-            else net.EnqueueBatch(data, false);
+            else net.EnqueueBatch(data, true);
             CoopRuntime.LogSource?.LogInfo($"[ReloadSync] powder select idx={idx} charge={chargeIndex}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ReloadSync OnLocalPowderSelect: {ex.Message}"); }
@@ -286,8 +288,9 @@ public static class ReloadSync
             w.Put((byte)2); // 投放发射药
             w.Put((byte)0);
             var data = NetProtocol.Snapshot(w);
+            // ⚠️ 2026-08-26：改 reliable（同 powder select——快速连续下药/投放丢包 → 客机装药拉杆不同步）。
             if (net.IsHost) net.EnqueueBatch(data, true);
-            else net.EnqueueBatch(data, false);
+            else net.EnqueueBatch(data, true);
             CoopRuntime.LogSource?.LogInfo($"[ReloadSync] powder load idx={idx}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ReloadSync OnLocalPowderLoad: {ex.Message}"); }
@@ -543,7 +546,8 @@ public static class ReloadSync
                 w.Put((byte)Math.Max(st, 0));
                 w.Put((byte)Math.Max(ch, 0));
             }
-            net.Transport.Send(steamId, NetProtocol.Snapshot(w), true);
+            // ⚠️ 2026-08-26：直发大包自动分片（Steam P2P 单包硬性限制）——装填全量快照多炮时可能超阈值。
+            net.SendDirectFragmented(steamId, NetProtocol.Snapshot(w), true);
             CoopRuntime.LogSource?.LogInfo($"[ReloadSync] full state → {steamId} guns={guns.Count}");
             return true;
         }

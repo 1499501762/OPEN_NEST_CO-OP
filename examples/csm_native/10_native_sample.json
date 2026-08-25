@@ -1,0 +1,61 @@
+{
+  "MissionID": "native.simple",
+  "MissionName": "原生任务示例（计时）",
+  "MissionType": "Chill",
+  "MapImage": "",
+  "MapTopoImage": "",
+  "Zones": [
+    {
+      "ID": "Allied",
+      "Name": "Turret Spawn",
+      "Role": 2,
+      "ZoneShape": 0,
+      "BottomLeft": { "Location": 44, "X": 0, "Y": 0 },
+      "Width": 10,
+      "Height": 10,
+      "Regions": []
+    },
+    {
+      "ID": "Enemy",
+      "Name": "Target Spawn",
+      "Role": 1,
+      "ZoneShape": 0,
+      "BottomLeft": { "Location": 84, "X": 0, "Y": 0 },
+      "Width": 10,
+      "Height": 10,
+      "Regions": []
+    }
+  ],
+  "RequisitionPoints": 0,
+  "PowderCharges": 0,
+  "Nodes": {
+    "start": {
+      "ID": "start",
+      "Connections": [
+        { "SourceNodeID": "start", "SourceFieldName": "To", "DestinationNodeID": "wait", "DestinationFieldName": "From" }
+      ],
+      "PosX": 0,
+      "PosY": 0,
+      "NodeType": "State_Start",
+      "NodeData": { "NodeID": "start" }
+    },
+    "wait": {
+      "ID": "wait",
+      "Connections": [
+        { "SourceNodeID": "wait", "SourceFieldName": "To", "DestinationNodeID": "done", "DestinationFieldName": "From" }
+      ],
+      "PosX": 250,
+      "PosY": 0,
+      "NodeType": "State_WaitSeconds",
+      "NodeData": { "NodeID": "wait", "Seconds": 5 }
+    },
+    "done": {
+      "ID": "done",
+      "Connections": [],
+      "PosX": 500,
+      "PosY": 0,
+      "NodeType": "State_End",
+      "NodeData": { "NodeID": "done", "ForceSetState": false }
+    }
+  }
+}

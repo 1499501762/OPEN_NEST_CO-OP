@@ -55,7 +55,7 @@ public sealed class ChargeInventorySync : ISyncedModule
             foreach (var p in net.Roster)
                 if (!p.IsLocal) net.Transport.Send(p.SteamId, data, true);
             if ((++_sendLog % 20) == 1)
-                CoopRuntime.LogSource?.LogInfo($"[ChargeInventorySync] host broadcast charges={cur}");
+                CoopLog.Debug("ChargeInventorySync.charges", () => $"[ChargeInventorySync] host broadcast charges={cur}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ChargeInventorySync Tick: {ex.Message}"); }
     }

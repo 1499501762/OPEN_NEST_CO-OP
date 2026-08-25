@@ -1,0 +1,17 @@
+{
+  "Id": "sample.branch",
+  "DisplayName": "击杀或撤退（示例，事件分支）",
+  "Description": "事件分支样板：等待事件 enemy.killed 走成功分支；120 秒超时走失败分支。演示 Branch/Routes/Timeout。纯新增任务。",
+  "MissionType": "Challenge",
+  "SceneName": "#sym:Mission Challenging",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Notify", "Title": "任务", "Message": "击杀目标或撤退！", "Duration": 4, "To": ["br"] },
+    { "Id": "br", "Kind": "Branch", "EventId": "enemy.killed", "Timeout": 120,
+      "Routes": [ { "EventId": "enemy.killed", "TargetNodeId": "win" } ], "To": ["lose"] },
+    { "Id": "win", "Kind": "Print", "Message": "目标已击杀，任务完成！", "To": ["we"] },
+    { "Id": "we", "Kind": "End" },
+    { "Id": "lose", "Kind": "Print", "Message": "超时，撤退！", "To": ["le"] },
+    { "Id": "le", "Kind": "Fail" }
+  ]
+}

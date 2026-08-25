@@ -36,7 +36,10 @@ public static class M3EnvSync
         {
             // 引擎：运行状态（点/关）——主机权威（ClientNoSend：客机只接收不上行）。
             // 客机开局引擎 Getter 读到 false（场景未加载完）会上行 v=0 关掉主机引擎 = 联机开局断电根因。
-            CoopSyncRegistry.RegisterBool("env/engine/running",
+            // ⚠️ 2026-08-26：SkipFull——排除出 ControlFull 全量广播，只走状态变化广播。
+            // 否则 ControlFull 心跳会把主机开局 getter 误读（initialRunning=False，场景加载起点）
+            // 广播给客机 → 客机被 STOP 关引擎 → 引擎停电。开局不广播、状态变化（false↔true）才广播。
+            var engineBinding = CoopSyncRegistry.RegisterBool("env/engine/running",
                 () =>
                 {
                     var e = GetEngine();
@@ -81,7 +84,9 @@ public static class M3EnvSync
                         }
                     }
                     catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"M3EnvSync engine: {ex.Message}"); }
-                }).ClientNoSend = true;
+                });
+            engineBinding.ClientNoSend = true;
+            engineBinding.SkipFull = true; // 排除 ControlFull 全量广播，只走状态变化广播
 
             // 高压系统：压力健康度 0-1（主机权威，客户端只接收）
             CoopSyncRegistry.RegisterFloat("env/pressure",

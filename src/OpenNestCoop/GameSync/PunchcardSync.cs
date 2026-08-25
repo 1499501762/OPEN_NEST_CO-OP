@@ -28,6 +28,16 @@ public sealed class PunchcardSync : ISyncedModule
     private bool _applying;
     private int _sendLog;
     private int _recvLog;
+    // ⚠️ 实例缓存（2026-08-25 帧性能）：FindObjectsOfType 全场景扫描很贵（曾占 ~120ms/s）——从每 0.2s 移到低频刷新（3s + 场景切换）
+    private PunchcardRuntime[] _cache;
+    private float _cacheTimer;
+    private int _cacheScene = -1;
+    private const float CacheRefreshSec = 3f;
+    // ⚠️ 2026-08-25 帧性能：RequisitionSlot 槽数组缓存——IsInRequisitionSlot 原每张卡每 0.2s 全场景
+    // FindObjectsOfType<RequisitionSlot>()（frame.log 曾占 ~105ms/s，PunchcardSync 第一大开销）→ 低频刷新（3s + 场景切换）
+    private static RequisitionSlot[] _slotCache;
+    private static float _slotCacheTimer;
+    private static int _slotCacheScene = -1;
     // 主机：每张卡牌上次状态签名（按卡牌定义 ID 做 key——两端索引顺序可能不同，2026-08-15）
     private readonly System.Collections.Generic.Dictionary<string, string> _hostSig = new();
     // 客机：拖拽状态跟踪（放下瞬间上行一次位置）
@@ -46,7 +56,8 @@ public sealed class PunchcardSync : ISyncedModule
 
         try
         {
-            var cards = UnityEngine.Object.FindObjectsOfType<PunchcardRuntime>(true); // includeInactive：卡牌可能 active=false（隐藏）
+            EnsureCache(dt);
+            var cards = _cache; // includeInactive：卡牌可能 active=false（隐藏）
             if (net.IsHost)
             {
                 if (cards == null || cards.Length == 0) return;
@@ -60,6 +71,19 @@ public sealed class PunchcardSync : ISyncedModule
             }
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync Tick: {ex.Message}"); }
+    }
+
+    /// <summary>场景实例缓存刷新：FindObjectsOfType 每 CacheRefreshSec 或场景切换才扫一次（省全场景扫描）。</summary>
+    private void EnsureCache(float dt)
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        _cacheTimer -= dt;
+        if (_cache == null || sc != _cacheScene || _cacheTimer <= 0f)
+        {
+            _cacheTimer = CacheRefreshSec;
+            _cacheScene = sc;
+            _cache = UnityEngine.Object.FindObjectsOfType<PunchcardRuntime>(true);
+        }
     }
 
     /// <summary>主机：变化检测广播所有卡牌位置/active/是否在槽（首次全量，之后只发变化的）。
@@ -121,7 +145,7 @@ public sealed class PunchcardSync : ISyncedModule
                 var p2 = c.transform.position;
                 cdiag += $" #{i}:{(act2 ? "A" : "H")}@({p2.x:0.0},{p2.y:0.0},{p2.z:0.0})";
             }
-            CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] host send n={n} sig={_hostSig.Count} cards=[{cdiag}]");
+            CoopLog.Debug("PunchcardSync.hostSend", () => $"[PunchcardSync] host send n={n} sig={_hostSig.Count} cards=[{cdiag}]");
         }
     }
 
@@ -477,12 +501,13 @@ public sealed class PunchcardSync : ISyncedModule
         catch { return false; }
     }
 
-    /// <summary>卡牌是否已在某 RequisitionSlot 卡槽里（在槽里时位置由槽控制，PunchcardSync 不覆盖）。</summary>
+    /// <summary>卡牌是否已在某 RequisitionSlot 卡槽里（在槽里时位置由槽控制，PunchcardSync 不覆盖）。
+    /// ⚠️ 2026-08-25 帧性能：改用槽数组缓存（GetSlotCache）——原每卡每 0.2s 全场景 FindObjectsOfType 是 105ms/s 大头。</summary>
     private static bool IsInRequisitionSlot(PunchcardRuntime c)
     {
         try
         {
-            var slots = UnityEngine.Object.FindObjectsOfType<RequisitionSlot>();
+            var slots = GetSlotCache();
             if (slots == null) return false;
             foreach (var s in slots)
             {
@@ -495,7 +520,22 @@ public sealed class PunchcardSync : ISyncedModule
         catch { }
         return false;
     }
+/// <summary>RequisitionSlot 槽数组缓存（低频 3s 刷新 + 场景切换）——省 IsInRequisitionSlot 高频全场景扫描。
+    /// ⚠️ static：IsInRequisitionSlot 是 static（HostSendChanges 每卡调用），槽数组跨实例共享。</summary>
+    private static RequisitionSlot[] GetSlotCache()
+    {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        _slotCacheTimer -= UnityEngine.Time.unscaledDeltaTime;
+        if (_slotCache == null || sc != _slotCacheScene || _slotCacheTimer <= 0f)
+        {
+            _slotCacheTimer = CacheRefreshSec;
+            _slotCacheScene = sc;
+            _slotCache = UnityEngine.Object.FindObjectsOfType<RequisitionSlot>();
+        }
+        return _slotCache;
+    }
 
+    
     public void OnSessionStarted() { }
     public void OnSessionEnded() { Reset(); }
     public void Reset() { _timer = 0f; _applying = false; _hostSig.Clear(); _dragState.Clear(); }

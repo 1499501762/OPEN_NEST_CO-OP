@@ -125,6 +125,62 @@ public sealed class IronNestNativeUi : INativeUiService
 
             if (spriteOk == 0)
                 OpenNestCore.Logging.CoopLog.Warn("NativeUi.verify", () => "候选原生 sprite 全 null（路径/名字与 m_Name 不同，或同步 Load 被裁）");
+
+            // ---- 细查（2026-08-23）：区分"子目录路径≠m_Name"还是"同步 sprite Load 被剥离" ----
+            // A. LoadAll<Sprite>("") 枚举 Resources 根目录运行时真实可加载的精灵（决定性）
+            try
+            {
+                var all = Resources.LoadAll<Sprite>("");
+                OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"probe LoadAll<Sprite>('') count={(all != null ? all.Length : -1)}");
+                if (all != null && all.Length > 0)
+                {
+                    var names = new System.Collections.Generic.List<string>();
+                    for (int i = 0; i < all.Length; i++) names.Add(all[i].name);
+                    OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"probe LoadAll root names: {string.Join("|", names)}");
+                }
+            }
+            catch (System.Exception ex) { OpenNestCore.Logging.CoopLog.Warn("NativeUi.verify", () => $"probe LoadAll('') EX: {ex.Message}"); }
+
+            // D. 非泛型/类型重载对照（裁决：是否仅"泛型 Load<T> 实例化"失效）
+            try
+            {
+                var d1 = Resources.Load("IronRoadMap");
+                OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"probe Load('IronRoadMap') [non-generic] -> {(d1 != null ? "OK " + d1.name : "null")}");
+            }
+            catch (System.Exception ex) { OpenNestCore.Logging.CoopLog.Warn("NativeUi.verify", () => $"probe Load('IronRoadMap') EX: {ex.Message}"); }
+            try
+            {
+                var d3 = Resources.Load("AchievementDisplay");
+                OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"probe Load('AchievementDisplay') [non-generic] -> {(d3 != null ? "OK " + d3.name : "null")}");
+            }
+            catch (System.Exception ex) { OpenNestCore.Logging.CoopLog.Warn("NativeUi.verify", () => $"probe Load('AchievementDisplay') EX: {ex.Message}"); }
+
+            // B. 常见子目录 LoadAll 盲试（若有命中 → 路径≠m_Name 成立）
+            string[] dirs = { "UI", "Sprites", "Images", "Icons", "UI/Sprites", "Sprites/UI" };
+            foreach (var d0 in dirs)
+            {
+                try
+                {
+                    var arr = Resources.LoadAll<Sprite>(d0);
+                    OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"probe LoadAll<Sprite>('{d0}') count={(arr != null ? arr.Length : -1)}");
+                    if (arr != null && arr.Length > 0)
+                        for (int i = 0; i < arr.Length && i < 10; i++)
+                            OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"    [{d0}] '{arr[i].name}'");
+                }
+                catch (System.Exception ex) { OpenNestCore.Logging.CoopLog.Warn("NativeUi.verify", () => $"probe LoadAll('{d0}') EX: {ex.Message}"); }
+            }
+
+            // C. UIElement8px 路径变体 Load（若某变体 OK → 路径≠m_Name；若全 null → 同步 sprite Load 被剥离）
+            string[] variants = { "UIElement8px", "UI/UIElement8px", "Sprites/UIElement8px", "Images/UIElement8px", "UIElement8px.png" };
+            foreach (var v in variants)
+            {
+                try
+                {
+                    var s = Resources.Load<Sprite>(v);
+                    OpenNestCore.Logging.CoopLog.Info("NativeUi.verify", () => $"probe Load<Sprite>('{v}') -> {(s != null ? "OK " + s.name : "null")}");
+                }
+                catch (System.Exception ex) { OpenNestCore.Logging.CoopLog.Warn("NativeUi.verify", () => $"probe Load<Sprite>('{v}') EX: {ex.Message}"); }
+            }
         }
         catch (Exception ex)
         {
@@ -325,6 +381,8 @@ public sealed class IronNestNativeUi : INativeUiService
                 }
                 else if (!main && was) { try { MainMenuUnloaded?.Invoke(); } catch { } }
             }
+            // ESC 菜单联机入口诊断（MainMenuEntry 内部节流 2s）
+            try { MainMenuEntry.Poll(); } catch { }
         }
         catch { }
     }

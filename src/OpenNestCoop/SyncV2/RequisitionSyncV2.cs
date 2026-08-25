@@ -33,7 +33,7 @@ public static class RequisitionSyncV2
                     if (p == null) return -1;
                     int c = 0;
                     try { c = p.CurrentCharges; } catch { }
-                    if ((++_powderSeenLog % 20) == 1) CoopRuntime.LogSource?.LogInfo($"[RequisitionV2] powder stock getter={c}");
+                    if ((++_powderSeenLog % 20) == 1) CoopLog.Debug("RequisitionV2.powderGetter", () => $"[RequisitionV2] powder stock getter={c}");
                     return c;
                 },
                 v =>

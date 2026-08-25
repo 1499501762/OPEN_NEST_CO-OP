@@ -22,6 +22,8 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class CatSync : ISyncedModule
 {
+    /// <summary>猫 AI 软同步（高频容忍丢失）→ 全局降频时优先降。</summary>
+    public NetModulePriority NetPriority => NetModulePriority.Low;
     public byte MsgType => 106;
     /// <summary>玩家-猫交互事件消息类型（同模块处理，见 CoopSyncRegistry.RegisterModule 附加类型）。</summary>
     public const byte CatEventMsgType = 133;
@@ -170,7 +172,7 @@ public sealed class CatSync : ISyncedModule
             }
             catch { }
             if ((++_sendLog % 10) == 1)
-                CoopRuntime.LogSource?.LogInfo($"[CatSync] host AI state n={n}");
+                CoopLog.Debug("CatSync.hostState", () => $"[CatSync] host AI state n={n}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"CatSync HostBroadcastState: {ex.Message}"); }
     }

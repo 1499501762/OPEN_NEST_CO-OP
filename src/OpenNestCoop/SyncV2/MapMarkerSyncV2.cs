@@ -171,7 +171,7 @@ public sealed class MapMarkerSyncV2 : ISyncedModule
         }
         else if (net.HostSteamId != 0)
             net.Transport.Send(net.HostSteamId, data, true);
-        CoopRuntime.LogSource?.LogInfo($"[MapMarkerSyncV2] erase broadcast id={id}");
+        CoopLog.Debug("MapMarkerSyncV2.erase", () => $"[MapMarkerSyncV2] erase broadcast id={id}");
     }
 
     public void OnPacket(ulong from, byte[] data)

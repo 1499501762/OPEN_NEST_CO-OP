@@ -78,6 +78,9 @@
 - ✅ 多人失焦暂停：patch `PauseManager.OnApplicationFocus` + `PauseOnFocusLoss=false` + `runInBackground=true`
 
 ### T2 — 地图桌 / 标记 / Token
+- ✅ **铁巢（TurretController）位置同步**（v0.2.0）：主机权威 patch `MoveTurret`/`SetTurretLocation`（MsgType=146，对齐 Synchrony NestMoveBridge）——铁巢坐标两端一致 → 追踪器轨迹 / 炮弹落点 / 打字机 `[GRID <turret>]` 一致。→ `docs/INTERACTABLES.md`
+- ✅ **追踪器（Map Table_ Shell Trajectory display）**（v0.2.0）：铁巢位置同步后本地轨迹自然一致，移除独立 144 同步（TrajectoryDisplaySync）
+- ✅ **铁巢 Token 开局错位**（v0.2.0）：铁巢 token 是可拖拽标记需同步，但开局 forceFull 全量跳过（游戏摆位两端同 seed 天然一致），只有玩家拖拽才广播——不再把"未摆位/摆位中"位置广播覆盖对端开局状态
 - ✅ MapToken 拖动 / T/F/S1-10 / 位置同步（编号+路径组合区分同名、首全量对齐+变化广播）
 - ✅ 铁巢 Token / 杀伤范围标盘、Token 初始位置错位（首全量对齐）
 - ✅ 地图标记擦除同步（MapMarkerSync 107 标志字节 + `DetectLocalErase` + `_applyingRemove` 防环）

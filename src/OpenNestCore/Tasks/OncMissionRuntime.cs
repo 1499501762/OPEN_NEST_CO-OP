@@ -253,6 +253,7 @@ public sealed class OncMissionRuntime
         var s = new OncMissionSyncState();
         s.MissionId = Mission?.Id;
         s.DoneCount = _done.Count;
+        s.DoneNodeIds = new List<string>(_done); // 已完成节点 ID 集合（精确恢复用）
         s.ActiveNodeIds = new List<string>();
         for (int i = 0; i < _active.Count; i++)
             if (_active[i] != null && _active[i].Node != null)
@@ -269,6 +270,59 @@ public sealed class OncMissionRuntime
         s.IsFinished = IsFinished;
         s.IsSuccess = IsSuccess;
         return s;
+    }
+
+    /// <summary>应用"同步序号"负载（联机主机权威：客机按主机快照对齐运行时状态）。
+    /// 对齐：已完成节点集 + 激活集 + 目标状态 + 结束标记。不重放节点动作（动作由各自图执行）。
+    /// 供 Core 引擎任务（<see cref="OncMissionRuntime"/> 驱动）联机使用；原生格式 CSM 走原生图
+    /// （联机由 MissionSync/MissionSyncV2 同步 scene/seed + 原生图节点）。</summary>
+    public void ApplySyncState(OncMissionSyncState s)
+    {
+        if (s == null || Mission == null) return;
+        if (s.MissionId != null && s.MissionId != Mission.Id) return; // 任务不匹配 → 忽略
+
+        // 已完成节点集：主机权威（客机本地多做的动作以下次主机快照为准回退）
+        _done.Clear();
+        if (s.DoneNodeIds != null)
+            for (int i = 0; i < s.DoneNodeIds.Count; i++)
+            {
+                var id = s.DoneNodeIds[i];
+                if (id != null && Mission.Node(id) != null) _done.Add(id);
+            }
+
+        // 激活集：清空并重建为主机激活节点（客机本地挂起的等待节点被主机权威覆盖）
+        _active.Clear();
+        if (s.ActiveNodeIds != null)
+            for (int i = 0; i < s.ActiveNodeIds.Count; i++)
+            {
+                var id = s.ActiveNodeIds[i];
+                if (id == null) continue;
+                var node = Mission.Node(id);
+                if (node == null) continue;
+                _active.Add(new ActiveNode { Node = node });
+                try { OnNodeEntered?.Invoke(this, node); } catch { }
+                try { Host?.OnNodeEntered(this, node); } catch { }
+            }
+
+        // 目标状态
+        if (s.Objectives != null)
+            for (int i = 0; i < s.Objectives.Count; i++)
+            {
+                var os = s.Objectives[i];
+                if (os == null) continue;
+                var o = Objective(os.Id);
+                if (o == null) continue;
+                o.Status = (OncObjectiveStatus)os.Status;
+                o.Progress = os.Progress;
+                try { OnObjectiveChanged?.Invoke(this, o); } catch { }
+            }
+
+        // 结束标记
+        if (s.IsFinished)
+        {
+            if (s.IsSuccess) { if (IsRunning) Complete(); else { IsRunning = false; IsFinished = true; IsSuccess = true; } }
+            else { if (IsRunning) Fail(); else { IsRunning = false; IsFinished = true; IsFailed = true; } }
+        }
     }
 
     // ---------- 内部：图执行 ----------
@@ -547,7 +601,8 @@ public sealed class OncMissionSyncState
     public bool IsFinished;
     public bool IsSuccess;
     public int DoneCount;
-    public List<string> ActiveNodeIds;
+    public List<string> DoneNodeIds;      // 已完成节点 ID 集合（精确恢复用）
+    public List<string> ActiveNodeIds;    // 当前激活（挂起）节点
     public List<OncObjectiveState> Objectives;
 }
 

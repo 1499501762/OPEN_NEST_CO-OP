@@ -37,11 +37,13 @@ public static class OncMissionIO
         o["Id"] = m.Id;
         o["DisplayName"] = m.DisplayName;
         o["Description"] = m.Description;
+        o["MissionType"] = m.MissionType;
         o["SceneName"] = m.SceneName;
         o["Seed"] = m.Seed;
         o["EntryPointId"] = m.EntryPointId;
         o["Requires"] = ToStrList(m.Requires);
         o["UnlockCondition"] = m.UnlockCondition;
+        if (m.Card != null) o["Card"] = SaveCard(m.Card);
         o["Objectives"] = SaveObjectives(m.Objectives);
         o["Nodes"] = SaveNodes(m.Nodes);
         return OncJson.Serialize(o);
@@ -79,6 +81,7 @@ public static class OncMissionIO
         o["IsFinished"] = s.IsFinished;
         o["IsSuccess"] = s.IsSuccess;
         o["DoneCount"] = s.DoneCount;
+        o["DoneNodeIds"] = ToStrList(s.DoneNodeIds);
         o["ActiveNodeIds"] = ToStrList(s.ActiveNodeIds);
         var obs = new List<object>();
         if (s.Objectives != null)
@@ -103,18 +106,46 @@ public static class OncMissionIO
         if (string.IsNullOrEmpty(json)) return null;
         var o = OncJson.ParseObject(json);
         if (o == null) return null;
+        var syms = ReadSymbols(o); // 顶层 "#sym" 符号表（定义任务所在场景等）
         var m = new OncMission();
         m.Id = OncJson.GetString(o, "Id");
         m.DisplayName = OncJson.GetString(o, "DisplayName");
         m.Description = OncJson.GetString(o, "Description");
-        m.SceneName = OncJson.GetString(o, "SceneName");
+        m.MissionType = OncJson.GetString(o, "MissionType");
+        m.SceneName = ResolveSym(OncJson.GetString(o, "SceneName"), syms);
         m.Seed = OncJson.GetInt(o, "Seed", -1);
         m.EntryPointId = OncJson.GetString(o, "EntryPointId");
         m.UnlockCondition = OncJson.GetString(o, "UnlockCondition");
+        m.Card = LoadCard(OncJson.GetObject(o, "Card"));
         m.Requires = ToList(OncJson.GetArray(o, "Requires"));
         m.Objectives = LoadObjectives(OncJson.GetArray(o, "Objectives"));
         m.Nodes = LoadNodes(OncJson.GetArray(o, "Nodes"));
         return m;
+    }
+
+    /// <summary>读取顶层 "#sym" 符号表（"#sym": { "名字": "值", ... }）——用于定义任务所在场景等可复用值。</summary>
+    private static Dictionary<string, string> ReadSymbols(Dictionary<string, object> o)
+    {
+        var d = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            var s = OncJson.GetObject(o, "#sym");
+            if (s == null) return d;
+            foreach (var kv in s)
+                if (kv.Value != null) d[kv.Key] = kv.Value.ToString();
+        }
+        catch { }
+        return d;
+    }
+
+    /// <summary>解析 "#sym:名字" 符号引用：优先查符号表；找不到剥掉 "#sym:" 前缀用字面
+    /// （如 "#sym:Mission tutorial 1" → "Mission tutorial 1"）。</summary>
+    private static string ResolveSym(string v, Dictionary<string, string> syms)
+    {
+        if (string.IsNullOrEmpty(v) || !v.StartsWith("#sym:", StringComparison.Ordinal)) return v;
+        string key = v.Substring(5);
+        if (syms != null && syms.TryGetValue(key, out var val) && !string.IsNullOrEmpty(val)) return val;
+        return key;
     }
 
     public static OncOperation LoadOperation(string json)
@@ -151,6 +182,7 @@ public static class OncMissionIO
         s.IsFinished = OncJson.GetBool(o, "IsFinished");
         s.IsSuccess = OncJson.GetBool(o, "IsSuccess");
         s.DoneCount = OncJson.GetInt(o, "DoneCount");
+        s.DoneNodeIds = ToList(OncJson.GetArray(o, "DoneNodeIds"));
         s.ActiveNodeIds = ToList(OncJson.GetArray(o, "ActiveNodeIds"));
         s.Objectives = new List<OncObjectiveState>();
         var arr = OncJson.GetArray(o, "Objectives");
@@ -316,6 +348,32 @@ public static class OncMissionIO
         return list;
     }
 
+    private static object SaveCard(OncMissionCard c)
+    {
+        var o = new Dictionary<string, object>();
+        o["X"] = c.X;
+        o["Y"] = c.Y;
+        o["Width"] = c.Width;
+        o["Height"] = c.Height;
+        o["TitleColor"] = c.TitleColor;
+        o["Background"] = c.Background;
+        return o;
+    }
+
+    private static OncMissionCard LoadCard(Dictionary<string, object> o)
+    {
+        if (o == null) return null;
+        return new OncMissionCard
+        {
+            X = OncJson.GetFloat(o, "X", -1f),
+            Y = OncJson.GetFloat(o, "Y", -1f),
+            Width = OncJson.GetFloat(o, "Width"),
+            Height = OncJson.GetFloat(o, "Height"),
+            TitleColor = OncJson.GetString(o, "TitleColor"),
+            Background = OncJson.GetString(o, "Background"),
+        };
+    }
+
     private static List<object> ToStrList(List<string> list)
     {
         var r = new List<object>();
@@ -336,6 +394,8 @@ public static class OncMissionIO
     private static OncNodeKind ParseKind(string s)
     {
         if (string.IsNullOrEmpty(s)) return OncNodeKind.Custom;
+        // 别名：JSON 里 "Print" → Teleprinter（打字机打印）
+        if (s.Equals("Print", StringComparison.OrdinalIgnoreCase)) return OncNodeKind.Teleprinter;
         return Enum.TryParse(s, true, out OncNodeKind k) ? k : OncNodeKind.Custom;
     }
 

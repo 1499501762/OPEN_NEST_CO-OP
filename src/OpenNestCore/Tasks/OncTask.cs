@@ -384,12 +384,31 @@ public sealed class OncObjective
     public bool IsActive => Status == OncObjectiveStatus.Active;
 }
 
+/// <summary>自定义任务在选任务面板的卡片配置（JSON "Card" 字段；位置/尺寸/颜色由任务脚本定义）。</summary>
+public sealed class OncMissionCard
+{
+    /// <summary>卡片相对父容器左上 x（向右；&lt;0 = 自动，按生成顺序排）。</summary>
+    public float X = -1f;
+    /// <summary>卡片相对父容器左上 y（向下；&lt;0 = 自动，按生成顺序排）。</summary>
+    public float Y = -1f;
+    /// <summary>卡片宽（&lt;=0 = 默认，参考原生卡片或 200）。</summary>
+    public float Width;
+    /// <summary>卡片高（&lt;=0 = 默认，参考原生卡片或 140）。</summary>
+    public float Height;
+    /// <summary>标题颜色（十六进制 "RRGGBB" 或 "AARRGGBB"；空 = 白）。</summary>
+    public string TitleColor;
+    /// <summary>背景颜色（同上；空 = 默认深色）。</summary>
+    public string Background;
+}
+
 /// <summary>自定义任务图（≈ MissionGraph 的平台无关抽象）。</summary>
 public sealed class OncMission
 {
     public string Id;
     public string DisplayName;
     public string Description;
+    /// <summary>卡片类型（映射原生 MissionTypes）："Tutorial" / "Campaign" / "Challenge" / "Chill"；空 = Campaign。</summary>
+    public string MissionType;
     /// <summary>要加载的任务场景名；空 = 在当前场景运行。</summary>
     public string SceneName;
     /// <summary>任务随机种子（&lt;=0 不设置）。</summary>
@@ -407,6 +426,9 @@ public sealed class OncMission
     public List<string> Requires = new List<string>();
     /// <summary>解锁条件表达式/事件（预留，字符串；宿主解释）。</summary>
     public string UnlockCondition;
+
+    /// <summary>选任务面板卡片配置（可选；位置/尺寸/颜色，见 <see cref="OncMissionCard"/>）。</summary>
+    public OncMissionCard Card;
 
     /// <summary>按 id 查节点。</summary>
     public OncNode Node(string id)

@@ -44,7 +44,7 @@ public sealed class GunLinkSync : ISyncedModule
                 Broadcast(c, linked, net);
             }
             if ((++_log % 20) == 1)
-                CoopRuntime.LogSource?.LogInfo($"[GunLinkSync] scan coords={coords.Length}");
+                CoopLog.Debug("GunLinkSync.scan", () => $"[GunLinkSync] scan coords={coords.Length}");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"GunLinkSync Tick: {ex.Message}"); }
     }

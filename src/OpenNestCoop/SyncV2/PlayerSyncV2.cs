@@ -19,6 +19,8 @@ namespace OpenNestCoop.SyncV2;
 /// </summary>
 public sealed class PlayerSyncV2 : ISyncedModule
 {
+    /// <summary>玩家位置/化身（10Hz，交互重要）→ 全局降频时轻微降。</summary>
+    public NetModulePriority NetPriority => NetModulePriority.High;
     public static PlayerSyncV2 Instance { get; } = new PlayerSyncV2();
 
     private PlayerSyncV2() { }
@@ -34,8 +36,9 @@ public sealed class PlayerSyncV2 : ISyncedModule
     private const float PitchDeadzone = 1.5f;
     private const float InterpRate = 12f;
     private const float SpeedSmooth = 0.25f;
+    private const float HeartbeatInterval = 2f; // reliable 硬同步心跳（对齐 V1 PlayerSync，2026-08-25）
 
-    private float _timer, _rosterTimer;
+    private float _timer, _rosterTimer, _hbTimer;
     private FirstPersonController _fpc;
     private float _fpcRetryTimer;   // D2：查找失败 1s 退避
     private bool _hasSent;
@@ -134,11 +137,20 @@ public sealed class PlayerSyncV2 : ISyncedModule
         _rosterTimer += dt;
         if (_rosterTimer >= 0.25f) { _rosterTimer = 0f; SyncRoster(); }
 
-        // 周期性上报自己的位置
+        // 周期性上报自己的位置（过程 → unreliable 通道；每 2s reliable 心跳硬同步）
+        // ⚠️ 2026-08-25 对齐用户原则：过程（高频连续位置）unreliable，结果/硬同步（心跳全量）reliable。
         _timer += dt;
-        if (_timer < Interval) return;
-        _timer = 0f;
-        SendLocal();
+        if (_timer >= Interval)
+        {
+            _timer = 0f;
+            SendLocal(false);
+        }
+        _hbTimer += dt;
+        if (_hbTimer >= HeartbeatInterval)
+        {
+            _hbTimer = 0f;
+            SendLocal(true); // reliable 心跳：位置长期丢失/新加入时可靠对齐（结果走 reliable 硬同步）
+        }
     }
 
     public void OnPacket(ulong from, byte[] data)
@@ -197,7 +209,7 @@ public sealed class PlayerSyncV2 : ISyncedModule
 
     // ---------------- 本地上报（Operator 权威） ----------------
 
-    private void SendLocal()
+    private void SendLocal(bool reliable)
     {
         var net = _net;
         if (net == null || net.Local == null || net.Local.PlayerId == 255) return;
@@ -217,7 +229,7 @@ public sealed class PlayerSyncV2 : ISyncedModule
             || Vector3.SqrMagnitude(tr.position - _lastPos) > PosDeadzone * PosDeadzone
             || Mathf.Abs(Mathf.DeltaAngle(yaw, _lastYaw)) > YawDeadzone
             || Mathf.Abs(Mathf.DeltaAngle(pitch, _lastPitch)) > PitchDeadzone;
-        if (!changed) return;
+        if (!changed && !reliable) return; // 心跳（reliable）时强制发送做硬同步
         _hasSent = true;
 
         // 真实水平速度 = 距上次发送位移 / 时间
@@ -249,7 +261,7 @@ public sealed class PlayerSyncV2 : ISyncedModule
             w.Put(flags);
             w.Put(pitch);
             w.Put(realSpeed);
-        }, reliable: false);
+        }, reliable: reliable);
 
         if ((++_sendLog % 25) == 0)
             CoopLog.Debug("SyncV2.playerSend", () => $"[SyncV2] PlayerSyncV2 send pid={pid} pos=({pos.x:0.0},{pos.y:0.0},{pos.z:0.0}) yaw={yaw:0}");

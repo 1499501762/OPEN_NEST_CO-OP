@@ -92,7 +92,7 @@ public sealed class PunchcardSyncV2 : ISyncedModule
         }
         if (!any && _hostSig.Count > 0) return;
         net.EnqueueBatch(NetProtocol.Snapshot(w), true);
-        if ((++_sendLog % 15) == 1) CoopRuntime.LogSource?.LogInfo($"[PunchcardSyncV2] host send n={n}");
+        if ((++_sendLog % 15) == 1) CoopLog.Debug("PunchcardSyncV2.hostSend", () => $"[PunchcardSyncV2] host send n={n}");
     }
 
     private void ClientSendDropEvents(PunchcardRuntime[] cards)

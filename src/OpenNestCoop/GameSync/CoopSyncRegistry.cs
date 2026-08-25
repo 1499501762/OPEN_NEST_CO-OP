@@ -15,6 +15,10 @@ public interface ISyncedModule
     /// <summary>本模块处理的消息类型（OnPacket 路由 key）。</summary>
     byte MsgType { get; }
 
+    /// <summary>网络负载优先级（NetworkGovernor per-module 分级）：决定同一全局档位下本模块的频率缩放。
+    /// 默认 Normal；高频/容忍丢失的模块（实体/猫/位置）设 Low，批量/低频设 Bulk，关键交互设 Critical。</summary>
+    NetModulePriority NetPriority => NetModulePriority.Normal;
+
     /// <summary>每帧/周期驱动（由 NetManager 在 Update 中调用）。</summary>
     void Tick(float dt);
 
@@ -77,9 +81,16 @@ public static class CoopSyncRegistry
     /// <summary>注册自定义同步模块（MsgType 需唯一；重复注册被忽略）。</summary>
     public static void RegisterModule(ISyncedModule module)
     {
-        if (module == null || _byType.ContainsKey(module.MsgType)) return;
+        if (module == null) return;
+        if (_byType.ContainsKey(module.MsgType))
+        {
+            // ⚠️ 冲突诊断：MsgType 被占用 → 该模块不注册（OnPacket 路由不命中 → 该消息不同步）
+            try { OpenNestCore.Logging.CoopLog.Warn("CoopSyncRegistry.conflict", () => $"[Registry] CONFLICT type={module.MsgType} class={module.GetType().Name} (already registered)"); } catch { }
+            return;
+        }
         _modules.Add(module);
         _byType[module.MsgType] = module;
+        try { OpenNestCore.Logging.CoopLog.Info("CoopSyncRegistry.reg", () => $"[Registry] register type={module.MsgType} class={module.GetType().Name}", 2f); } catch { }
     }
 
     /// <summary>注册自定义同步模块 + 附加消息类型（同模块处理多个 MsgType，如 CatSync 处理 106+133）。</summary>
@@ -121,7 +132,16 @@ public static class CoopSyncRegistry
 
         foreach (var m in _modules)
         {
-            try { m.Tick(dt); }
+            // ⚠️ per-module 网络分级：每模块按自己的 NetPriority 缩放 dt（NetworkGovernor.ModuleFreq）
+            float md = dt * OpenNestCoop.Net.NetworkGovernor.Instance.ModuleFreq(m.NetPriority);
+            try
+            {
+                // ⚠️ 帧性能剖析（F7 诊断）：测量每模块 Tick 耗时，按模块类型名归因
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                m.Tick(md);
+                long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                OpenNestCoop.Core.FrameProfiler.Instance.AddMs(m.GetType().Name, (t1 - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+            }
             catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"CoopSyncRegistry Tick: {ex.Message}"); }
         }
     }

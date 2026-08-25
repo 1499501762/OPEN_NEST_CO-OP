@@ -1,4 +1,5 @@
 ﻿using System;
+using Il2CppInterop.Runtime;
 using OpenNestCoop.Net;
 using LiteNetLib.Utils;
 
@@ -33,6 +34,7 @@ public sealed class MissionSync : ISyncedModule
     private int _lastRosterCount;
     private float _sceneKeepalive;
     private string _lastAppliedScene = "";
+    private string _hNodeId = ""; // 主机任务图当前节点（同步序号，诊断/进度显示用）
     private int _pendingSeed = -1;   // 待应用到 FireMission 的种子（场景加载后重试直到生效）
     /// <summary>主机记住的已生成种子（GetSeed 读不到 FireMission.seed 时的稳定回退——
     /// 避免主机每 0.5s 重新生成新 seed 导致广播变化、客机 fixedSeed 被反复覆盖 → 任务目标不同步）。
@@ -56,6 +58,7 @@ public sealed class MissionSync : ISyncedModule
         string scene = GetMissionId(mgr);
         byte phase = GetPhaseByte(mgr);
         int seed = GetSeed(mgr); // 任务随机种子（任务内容随机一致的关键）
+        string nodeId = GetProgressNode(mgr); // 任务图当前节点（同步序号）
         // 客机：任务场景加载后持续尝试把待应用种子写到 FireMission（直到生效）
         TryApplySeed();
         if (net.IsHost)
@@ -74,13 +77,13 @@ public sealed class MissionSync : ISyncedModule
             bool rosterChanged = _lastRosterCount != net.Roster.Count;
             _lastRosterCount = net.Roster.Count;
             _sceneKeepalive += dt;
-            bool changed = !_hknown || scene != _hScene || phase != _hPhase || seed != _hSeed || rosterChanged;
+            bool changed = !_hknown || scene != _hScene || phase != _hPhase || seed != _hSeed || nodeId != _hNodeId || rosterChanged;
             bool keepalive = _hknown && scene.Length > 0 && _sceneKeepalive >= 2f;
             if (_sceneKeepalive >= 2f) _sceneKeepalive = 0f;
             if (!changed && !keepalive) return;
-            _hknown = true; _hScene = scene; _hPhase = phase; _hSeed = seed;
-            CoopRuntime.LogSource?.LogInfo($"[MissionSync] host broadcast scene='{scene}' phase={phase} seed={seed} changed={changed} keepalive={keepalive} roster={net.Roster.Count}");
-            Broadcast(net, scene, phase, seed);
+            _hknown = true; _hScene = scene; _hPhase = phase; _hSeed = seed; _hNodeId = nodeId;
+            CoopRuntime.LogSource?.LogInfo($"[MissionSync] host broadcast scene='{scene}' phase={phase} seed={seed} node='{nodeId}' changed={changed} keepalive={keepalive} roster={net.Roster.Count}");
+            Broadcast(net, scene, phase, seed, nodeId);
         }
         else if (!_applying)
         {
@@ -101,10 +104,11 @@ public sealed class MissionSync : ISyncedModule
             string scene = r.GetString();
             byte phase = r.GetByte();
             int seed = r.GetInt();
+            string nodeId = r.GetString(); // 主机任务图当前节点（同步序号）
             var m = GetManager();
             if (m == null) return;
             var op = m.CurrentOperation;
-            CoopRuntime.LogSource?.LogInfo($"[MissionSync] recv scene='{scene}' phase={phase} seed={seed} isHost={net.IsHost} op={(op == null ? "null" : "ok")} curScene={m.CurrentMissionSceneName} lastApplied={_lastAppliedScene}");
+            CoopRuntime.LogSource?.LogInfo($"[MissionSync] recv scene='{scene}' phase={phase} seed={seed} node='{nodeId}' isHost={net.IsHost} op={(op == null ? "null" : "ok")} curScene={m.CurrentMissionSceneName} lastApplied={_lastAppliedScene}");
             // ⚠️ 任务内容随机一致性：记录主机种子，并在任务场景加载后应用到 FireMission
             // （两端用同一随机种子生成任务内容 → 随机一致）。FireMission 可能未就绪，存 _pendingSeed 持续重试；
             // 同时更新 PendingSeed 供 Harmony patch FireMission.GenerateMission 在生成前应用。
@@ -117,7 +121,10 @@ public sealed class MissionSync : ISyncedModule
             {
                 if (net.IsHost)
                 {
-                    m.CurrentMissionSceneName = scene;
+                    // ⚠️ 自定义任务（@c: 前缀）：主机以 CurrentMission 真实图为准（GetMissionId 已从图读），
+                    // 不覆盖 CurrentMissionSceneName——避免缓存污染（自定义任务 scene 名可能与原生任务同名）。
+                    if (!IsCustomTag(scene))
+                        m.CurrentMissionSceneName = scene;
                 }
                 else
                 {
@@ -134,7 +141,8 @@ public sealed class MissionSync : ISyncedModule
                         }
                         else if (scene != _lastAppliedScene)
                         {
-                            if (m.CurrentMissionSceneName == scene || (m.CurrentMission != null && m.CurrentMission.MissionID == scene))
+                            string raw = UnwrapMissionTag(scene); // 去 @c:/@n: 前缀
+                            if (m.CurrentMissionSceneName == raw || (m.CurrentMission != null && m.CurrentMission.MissionID == raw))
                             {
                                 // 客机本地已在目标任务（玩家已手动开始）→ 直接标记已应用
                                 _lastAppliedScene = scene;
@@ -156,11 +164,11 @@ public sealed class MissionSync : ISyncedModule
             }
             finally { _applying = false; }
             _known = true; _knownScene = scene; _knownPhase = phase; /* _knownSeed = seed; */ // V1 死代码
-            _hknown = true; _hScene = scene; _hPhase = phase; _hSeed = seed;
+            _hknown = true; _hScene = scene; _hPhase = phase; _hSeed = seed; _hNodeId = nodeId;
             if (net.IsHost)
                 net.EnqueueBatch(data, true);
         }
-        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"MissionSync OnPacket: {ex.Message}"); }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"MissionSync OnPacket: {ex.Message}\n{ex.StackTrace}"); }
     }
 
     /// <summary>尝试把待应用种子写到 FireMission；成功后清除待应用标记。</summary>
@@ -171,11 +179,28 @@ public sealed class MissionSync : ISyncedModule
             _pendingSeed = -1;
     }
 
-    /// <summary>按任务场景名找 MissionGraph 并加载（客机跟随主机开始任务）。成功返回 true。</summary>
+    /// <summary>按任务标识找 MissionGraph 并加载（客机跟随主机开始任务）。成功返回 true。
+    /// ⚠️ 2026-08-25 修复：不再直接调 m.LoadMission（MLL interop 该重载签名不匹配 → Method not found），
+    /// 改用 card.ActivateMission()/StartOperation（原生完整链路）；不再主动 LoadMainMenu/EnterBrowsingMap
+    /// （避免把客机拉回选任务界面——失败保持现状等主机 2s 保活重发）。</summary>
     private static bool TryLoadMissionScene(string scene, MissionManager m)
     {
         try
         {
+            CoopRuntime.LogSource?.LogInfo($"[MissionSync] TryLoad('{scene}') phase=2");
+            // ⚠️ 自定义任务（@c:<MissionID> 前缀）：走 OncMissionBridge.StartNative（ImportMission 完整链路），
+            // 不再遍历 MapCard——自定义任务卡片不在场景，且 scene 名可能与原生任务同名（会命中原生卡片进错任务）。
+            if (IsCustomTag(scene))
+            {
+                string id = scene.Substring(3);
+                if (OncMissionBridge.GetNativeJson(id) != null)
+                {
+                    CoopRuntime.LogSource?.LogInfo($"[MissionSync] custom mission '{id}' → OncMissionBridge.StartNative");
+                    return OncMissionBridge.StartNative(id);
+                }
+                CoopRuntime.LogSource?.LogWarning($"[MissionSync] custom mission '{id}' json not found on this client (skip)");
+                return false;
+            }
             // 优先：场景中的 MapCard（最接近“玩家点击任务卡片”的正常流程）。
             // MapCard.Campaign / .Mission 是场景序列化引用，正是点卡片时传给
             // StartOperation 的同一实例。客机在没点过卡片前 CurrentOperation 恒为 null，
@@ -199,9 +224,8 @@ public sealed class MissionSync : ISyncedModule
                             try { m.StartOperation(card.Campaign, card.Mission); return true; }
                             catch (Exception ex2) { CoopRuntime.LogSource?.LogWarning($"MissionSync StartOperation: {ex2.Message}"); }
                         }
-                        // 3) 最后回退：仅加载任务场景
-                        try { m.LoadMission(card.Mission, false); return true; }
-                        catch (Exception ex3) { CoopRuntime.LogSource?.LogWarning($"MissionSync LoadMission: {ex3.Message}"); }
+                        // ⚠️ 不再调 LoadMission（MLL interop 签名不匹配）：记录并继续，等主机保活重发
+                        CoopRuntime.LogSource?.LogWarning($"MissionSync: matched card '{scene}' but Activate/StartOperation failed, wait for host resend");
                     }
                 }
             }
@@ -222,16 +246,15 @@ public sealed class MissionSync : ISyncedModule
                     if (MatchMission(scene, graph))
                     {
                         CoopRuntime.LogSource?.LogInfo($"MissionSync: loading mission '{scene}' (op:{graph.MissionID})");
-                        m.LoadMission(graph, false);
-                        return true;
+                        // ⚠️ 用 StartOperation 代替 LoadMission（MLL interop LoadMission 签名不匹配）
+                        try { m.StartOperation(op, graph); return true; }
+                        catch (Exception ex4) { CoopRuntime.LogSource?.LogWarning($"MissionSync StartOperation(op): {ex4.Message}"); }
                     }
                 }
             }
 
-            // 都不行 → 初始化选任务界面（让 MapCard 出现），等待主机保活重发再试
-            CoopRuntime.LogSource?.LogInfo($"MissionSync: no loadable mission '{scene}' (cards={cardCount}), entering mission-select and retrying");
-            try { m.LoadMainMenu(); } catch { }
-            try { m.EnterBrowsingMap(); } catch { }
+            // ⚠️ 不主动进选任务界面（避免把客机拉回选任务 Card）——保持现状，等主机 2s 保活重发再试
+            CoopRuntime.LogSource?.LogInfo($"MissionSync: no loadable mission '{scene}' (cards={cardCount}), waiting for host resend");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"MissionSync TryLoadMissionScene: {ex.Message}"); }
         return false;
@@ -271,6 +294,7 @@ public sealed class MissionSync : ISyncedModule
             w.Put(scene ?? "");
             w.Put(phase);
             w.Put(seed);
+            w.Put(GetProgressNode(m) ?? ""); // 任务图当前节点（同步序号）
             return NetProtocol.Snapshot(w);
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"MissionSync BuildMissionSnapshot: {ex.Message}"); }
@@ -293,7 +317,7 @@ public sealed class MissionSync : ISyncedModule
         _known = false; _hknown = false; _applying = false;
         _knownScene = ""; _hScene = ""; _knownPhase = 0; _hPhase = 0;
         /* _knownSeed = -1; */ _hSeed = -1; // V1 死代码（_knownSeed 只写不读）
-        _lastAppliedScene = "";
+        _hNodeId = ""; _lastAppliedScene = "";
     }
 
     private static MissionManager GetManager()
@@ -313,13 +337,53 @@ public sealed class MissionSync : ISyncedModule
         try
         {
             if (m == null) return "";
-            var n = m.CurrentMissionSceneName;
-            if (!string.IsNullOrEmpty(n)) return n;
+            // ⚠️ 自定义任务（CSM，IsNativeCustomGraph）：广播自定义 MissionID（@c: 前缀）而非 scene 名——
+            // 自定义任务 scene 名（如 "Mission tutorial 4"）可能与原生任务同名，客机按 scene 名会命中原生卡片进错任务。
             var cm = m.CurrentMission;
+            if (cm != null && OncMissionBridge.IsNativeCustomGraph(cm))
+            {
+                string mid = "";
+                try { mid = cm.MissionID; } catch { }
+                if (!string.IsNullOrEmpty(mid)) return "@c:" + mid;
+            }
+            var n = m.CurrentMissionSceneName;
+            // ⚠️ MissionBase 是无区分度默认场景名（多数原生任务 SceneReference 未列动态场景 → 客机无法
+            // 用它匹配任务卡片）→ 回退 CurrentMission.MissionID（原生任务 ID，客机可按 MissionID 匹配）。
+            if (!string.IsNullOrEmpty(n) && !n.Equals("MissionBase", StringComparison.Ordinal)) return n;
             if (cm != null && !string.IsNullOrEmpty(cm.MissionID)) return cm.MissionID;
+            return n ?? "";
         }
         catch { }
         return "";
+    }
+
+    /// <summary>任务标识是否带 @c: 前缀（自定义任务 MissionID）。</summary>
+    private static bool IsCustomTag(string tagged)
+        => tagged != null && tagged.StartsWith("@c:", StringComparison.Ordinal);
+
+    /// <summary>解任务标识前缀（@c: 自定义 MissionID / @n: 原生 scene；无前缀按原生 scene 原样返回）。</summary>
+    private static string UnwrapMissionTag(string tagged)
+    {
+        if (string.IsNullOrEmpty(tagged)) return tagged;
+        if (tagged.StartsWith("@c:", StringComparison.Ordinal) || tagged.StartsWith("@n:", StringComparison.Ordinal))
+            return tagged.Substring(3);
+        return tagged;
+    }
+
+    /// <summary>任务图当前主执行线节点（同步序号）：读 MissionManager.CurrentMission.CurrentState.Node.NodeID。
+    /// 原生图未运行/无状态返回 ""。供主机广播任务进度（客机诊断/显示）。</summary>
+    private static string GetProgressNode(MissionManager m)
+    {
+        try
+        {
+            if (m == null || m.CurrentMission == null) return "";
+            var cs = m.CurrentMission.CurrentState;
+            if (cs == null) return "";
+            var n = cs.Node;
+            if (n == null) return "";
+            try { return n.TryCast<SleepyNodes.StateNode>()?.NodeID ?? ""; } catch { return ""; }
+        }
+        catch { return ""; }
     }
 
     private static byte GetPhaseByte(MissionManager m)
@@ -404,9 +468,13 @@ public sealed class MissionSync : ISyncedModule
         if (seed < 0) return;
         try
         {
+            // ⚠️ 2026-08-26 诊断：应用前 dump 当前 fixedSeed——确认是否已应用过（避免重复设置/被覆盖）。
+            int before = -1; bool ufix = false;
+            try { before = (int)fm.fixedSeed; } catch { }
+            try { ufix = fm.useFixedSeed; } catch { }
             fm.useFixedSeed = true;
             fm.fixedSeed = seed;
-            CoopRuntime.LogSource?.LogInfo($"[MissionSync] applying seed={seed} before GenerateMission -> FireMission");
+            CoopRuntime.LogSource?.LogInfo($"[MissionSync] applying seed={seed} before GenerateMission -> FireMission (was fixedSeed={before} useFixedSeed={ufix})");
         }
         catch (Exception ex)
         {
@@ -415,7 +483,7 @@ public sealed class MissionSync : ISyncedModule
     }
 
     /// <summary>主机广播任务状态给所有远端（任务开始事件，可靠直发）。</summary>
-    private void Broadcast(NetManager net, string scene, byte phase, int seed)
+    private void Broadcast(NetManager net, string scene, byte phase, int seed, string nodeId)
     {
         try
         {
@@ -423,6 +491,7 @@ public sealed class MissionSync : ISyncedModule
             w.Put(scene ?? "");
             w.Put(phase);
             w.Put(seed);
+            w.Put(nodeId ?? ""); // 任务图当前节点（同步序号）
             var data = NetProtocol.Snapshot(w);
             // 任务开始是事件，用可靠直发，保证客机收到
             foreach (var p in net.Roster)
@@ -437,6 +506,7 @@ public sealed class MissionSync : ISyncedModule
         w.Put(scene ?? "");
         w.Put(phase);
         w.Put(seed);
+        w.Put(GetProgressNode(GetManager()) ?? ""); // 客机上报当前图节点（主机诊断用）
         net.EnqueueBatch(NetProtocol.Snapshot(w), false);
     }
 }

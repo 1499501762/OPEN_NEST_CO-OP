@@ -7,6 +7,14 @@
 > **2026-08-23 修订**（同步至 **0.1.8** 代码基线）：V1 模块清单补全（新增 ArmSync / CylinderActionSync /
 > ChargeInventorySync / ChargeButtonSync）、StateSnapshotSync 已注册快照补全为 8 个、TurretSync 精简说明、
 > 装填事件驱动与方向角双通道、SyncV2（`--sync new`，MsgType 200-229 分层）现状。
+>
+> **2026-08-25 修订**：新增 `Net/NetworkGovernor.cs`（网络负载分级调控器）——`UpdateCommon` 模块 Tick
+> 统一 dt 缩放降频、`EnqueueBatch/FlushBatch` 合包上限/拆包阈值动态化、OnPong 喂 RTT；
+> `--nettier <critical|low|normal|high>` 手动锁定。详见 `docs/NETWORK_GOVERNOR.md`。
+>
+> **2026-08-25 通道原则**：**过程（高频连续值/位置）→ unreliable；结果（离散状态/事件/心跳全量）→ reliable 硬同步**。
+> V1 已符合（PlayerSync 位置/ValueSync 高频 unreliable + 2s reliable 心跳）；V2 修正（`ValueLayer` 心跳/低频改 reliable、
+> `PlayerSyncV2` 加 2s reliable 心跳）。
 
 ---
 
@@ -59,8 +67,12 @@ ChargeButtonSync / MapTokenSync / GunLinkSync / PunchcardSync / M3EnvSync / Requ
 - `LocalMode` → `UpdateLocal`；否则 `EnsureSteamContext()` → `SteamAPI.RunCallbacks()` →
   `AutoJoin.TryStart` → `Lobby.PollPendingLobbyList()` → `while (Transport.Poll(...)) OnPacket(...)`。
 
-`UpdateCommon(dt)`（:207）每帧：每 3s Ping 测 RTT → 依次 Tick `PlayerSync → RecordPlayerSync →
-ReloadSync → MapSync → ControlSync(含 ValueSync) → CoopSyncRegistry.TickAll → FlushBatch()` →
+`UpdateCommon(dt)`（:207）每帧：`NetworkGovernor.Tick(dt)`（网络负载分级评估，见
+`docs/NETWORK_GOVERNOR.md`）→ 每 3s Ping 测 RTT（用原始 dt，不被缩放）→ 依次 Tick
+`PlayerSync → RecordPlayerSync → ReloadSync → MapSync → ControlSync(含 ValueSync) →
+CoopSyncRegistry.TickAll`——**每模块按各自 `NetPriority` 精细化缩放**（`dt × ModuleFreq(优先级)`：
+关键交互几乎不降、高频容忍丢失模块优先降，见 `docs/NETWORK_GOVERNOR.md` 二点五）→
+`FlushBatch()`（拆包/合包上限由 Governor 动态控制，发送前 `NetLagSim.AllowSend` 模拟 Steam P2P 限制）→
 每 10s 打印收发统计。
 
 状态迁移：
@@ -230,6 +242,7 @@ currentSelectedCharges）+ **开局误激活修复**（移除 Tick 补激活链�
   - 其余模块默认 reliable（命令/事件/快照不变，46 处现有调用零改动）
   - **修复**：`MapSync` 的 MapMarkerAdd/Remove/ClearAll（离散状态，边沿触发无周期重发）原先误走 unreliable → 已改 reliable（丢失会永久不一致：标记缺失/残留）
 - **⚠️ unreliable 单条大小约束**：unreliable 消息只要任意分片丢失 → 整条全部丢弃（不会收残缺版）。因此 **unreliable 不合并成大 Batch**（分片整条丢 + 连坐多个子包），而是**每个子包单独小包发送**（单条几十 B，互不影响）；单条 >1100B 降级 reliable（保证送达）。接收端直接路由裸状态包（首字节 MsgType），reliable 路径仍合包 Batch。
+- **通道选择原则（2026-08-25，用户方案）**：**过程（高频连续值/位置，容忍丢失）→ unreliable 通道；结果（离散状态/事件/心跳全量）→ reliable 通道硬同步**。unreliable 丢包由 reliable 心跳（2s 全量）校正——发送端必须有低频 reliable 保底。当前：V1 `PlayerSync`（位置 `!hb` unreliable + 心跳 reliable）、`ValueSync`（高频 unreliable + 低频/心跳 reliable）已符合；V2 `ValueLayer`/`PlayerSyncV2` 已修正对齐（见 `docs/SYNC_V2_DEV.md`）。
 - **保底回退**：unreliable 丢包由低频 reliable 心跳校正（ValueSync 2s 心跳 / PlayerSync 2s 心跳），无需接收端反馈协议。
   ⚠️ Steam 真实丢包/乱序需 Steam 联机实测（local 双开是 TCP 不丢包，仅验证代码路径）；历史教训"unreliable 高频曾全断"，保底心跳已覆盖。
 
@@ -261,6 +274,7 @@ currentSelectedCharges）+ **开局误激活修复**（移除 Tick 补激活链�
 | `Core/CoopRuntime.cs` | 平台无关核心：初始化/Startup/Shutdown、模块注册 |
 | `Core/CoopBehaviour.cs` | 唯一帧驱动（Update → net.Update）|
 | `Net/NetManager.cs` | 会话状态机、收发泵、批量合包 |
+| `Net/NetworkGovernor.cs` | 网络负载分级调控器（NetQualityTier × 频率/合包/拆包动态控制，见 `docs/NETWORK_GOVERNOR.md`）|
 | `Net/NetProtocol.cs` | 消息协议、序列化、Roster |
 | `Net/ITransport.cs` | 传输抽象 |
 | `Net/SteamTransport.cs` | Steamworks P2P 实现 |

@@ -6,14 +6,17 @@
 #   .\scripts\dualtest.ps1 -ClientOnly          # only start client
 #   .\scripts\dualtest.ps1 -Local -HostGame G:\... -ClientGame D:\...
 #   .\scripts\dualtest.ps1 -Local -Lag 100 -LagJitter 30   # override simulated delay
+#   .\scripts\dualtest.ps1 -Local -NetCap 0 -NetLoss 0      # disable network cap/loss sim
 #
 # -Local: host listens on 127.0.0.1:port, client connects -- no Steam needed.
 # Without -Local: requires TWO Steam sessions (two accounts) because Steamworks
 # rejects two same-AppID processes on one Steam client.
 #
-# Constants (port / delay / jitter / lobby file / exe name) live in scripts/env.ps1
-# (LocalTestPort / LocalTestLagMs / LocalTestLagJitterMs / LobbyFile / SteamExe).
-# Pass -Lag / -LagJitter to override for this run; -Lag 0 disables delay simulation.
+# Constants (port / delay / jitter / cap / loss / packet / lobby file / exe name)
+# live in scripts/env.ps1 (LocalTestPort / LocalTestLagMs / LocalTestLagJitterMs /
+# LocalTestNetCapKBps / LocalTestNetLossPercent / LocalTestNetPacketCapB / LobbyFile / SteamExe).
+# Pass -Lag / -LagJitter / -NetCap / -NetLoss / -NetPacket to override for this run;
+# 0 disables the corresponding simulation. Steam P2P 网络限制模拟默认开启（社区安全范围）。
 #
 # NOTE: Keep this file PURE ASCII (PowerShell 5.1 compatibility).
 [CmdletBinding()]
@@ -27,6 +30,9 @@ param(
     [int]$Port = -1,
     [int]$Lag = -1,
     [int]$LagJitter = -1,
+    [int]$NetCap = -1,
+    [int]$NetLoss = -1,
+    [int]$NetPacket = -1,
     [string]$Sync
 )
 
@@ -50,11 +56,17 @@ if (-not $HostGame -or -not (Test-Path $HostGame)) {
 }
 
 # 默认常量（env.ps1 提供，未设置时回退）：
-#   SteamExe / LocalTestPort / LocalTestLagMs / LocalTestLagJitterMs / LobbyFile
+#   SteamExe / LocalTestPort / LocalTestLagMs / LocalTestLagJitterMs /
+#   LocalTestNetCapKBps / LocalTestNetLossPercent / LocalTestNetPacketCapB / LobbyFile
 if (-not $SteamExe) { $SteamExe = "Iron Nest Heavy Turret Simulator.exe" }
 if ($Port -lt 0) { $Port = if ($LocalTestPort) { $LocalTestPort } else { 29507 } }
 if ($Lag -lt 0) { $Lag = if ($LocalTestLagMs) { $LocalTestLagMs } else { 0 } }
 if ($LagJitter -lt 0) { $LagJitter = if ($LocalTestLagJitterMs) { $LocalTestLagJitterMs } else { 0 } }
+# Steam P2P 网络环境限制模拟（默认开启；0 = 关闭对应项）：
+#   NetCap=200KB/s（社区安全范围上界）/ NetLoss=5% / NetPacket=1200B（Steam unreliable 硬限制）
+if ($NetCap -lt 0) { $NetCap = if ($LocalTestNetCapKBps) { $LocalTestNetCapKBps } else { 200 } }
+if ($NetLoss -lt 0) { $NetLoss = if ($LocalTestNetLossPercent) { $LocalTestNetLossPercent } else { 5 } }
+if ($NetPacket -lt 0) { $NetPacket = if ($LocalTestNetPacketCapB) { $LocalTestNetPacketCapB } else { 1200 } }
 
 $Exe = $SteamExe
 $hostExe = Join-Path $HostGame $Exe
@@ -74,10 +86,15 @@ if ($Sync) { $syncArg = "--sync $Sync" }
 # 网络延迟模拟：--lag <ms>（基础单向延迟）+ --lagjitter <ms>（波动 ±）。Lag=0 时不传。
 $lagArg = ""
 if ($Lag -gt 0) { $lagArg = "--lag $Lag --lagjitter $LagJitter" }
+# Steam P2P 网络环境限制模拟（默认开启）：--netcap <KB/s> 带宽 / --netpacket <B> 单包 / --netloss <%> 丢包。0 时不传。
+$netArg = ""
+if ($NetCap -gt 0) { $netArg = "$netArg --netcap $NetCap" }
+if ($NetPacket -gt 0) { $netArg = "$netArg --netpacket $NetPacket" }
+if ($NetLoss -gt 0) { $netArg = "$netArg --netloss $NetLoss" }
 
 function Start-Game {
     param([string]$ExePath, [string]$Arg)
-    $fullArg = "$Arg $syncArg $lagArg $WindowArg"
+    $fullArg = "$Arg $syncArg $lagArg $netArg $WindowArg"
     Write-Host "Launching: $ExePath $fullArg" -ForegroundColor Cyan
     Start-Process -FilePath $ExePath -ArgumentList $fullArg -WorkingDirectory (Split-Path $ExePath)
 }
