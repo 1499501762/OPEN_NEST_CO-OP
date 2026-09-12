@@ -26,6 +26,8 @@
 > - 2026-09-12（三）按用户决策修订：**与 Core 独立**（自带源码副本 + 独立命名空间，不再往 `OpenNestCore.ModMenu` 放契约，改放 `OpenNestModMenu.API`）；
 >   补 §1.2 独立性技术后果；§3.2/§3.3 用**桥源码 + 本机环境实测**替换全部“待实测”（别名策略 / 目录真值 / 哈希证据）；
 >   补 §4.2 加载器原生顺序语义（`MelonPriority` + 依赖拓扑）；§E 补 MelonLoader 原生排除语义与 `--no-mods`；§七 改为独立工程布局。
+> - 2026-09-12（四）澄清“三个独立模组”（OpenNestCoop / OpenNestModMenu / 桥）互不归属：配置改为**通用格式兼容层**（不拷任何具体模组的配置类，见 §6.2）；
+>   本模组自身配置放到**各加载器的社区惯例位置**；§5.1 重写 `sortingOrder` 说明（为何需要 + 固定值 + 可配置，不再说“协商”）。
 
 ---
 
@@ -50,7 +52,7 @@
 | `src/OpenNestCore/Logging/CoopLog.cs`（+ `ILogger`） | `OpenNestModMenu.Logging` | 直拷 |
 | `src/OpenNestCore/FrameProfiler.cs` | `OpenNestModMenu.Diagnostics` | 直拷 |
 | `src/OpenNestCoop/UI/IronNestNativeUi.cs` | `OpenNestModMenu.Bridge` | **移植精简版**（引 `Assembly-CSharp`，只能放模组侧；`#if !MELONLOADER` 排除 `GetFont`） |
-| `src/OpenNestCoop/Core/Config/CoopConfig.cs` | `OpenNestModMenu.Config` | 拷一份（**格式/语义对齐** `docs/CONFIG.md`），但**不引用 OpenNestCoop**；本模组配置文件独立为 `BepInEx/config/OpenNestModMenu.cfg` |
+| `src/OpenNestCoop/Core/Config/CoopConfig.cs` | — | **不拷**。仅作为“社区 INI 写法”的**参考样例**（`##` 注释 + `[Section]` + `Key = Value` + `## 类型: bool | 默认: true`）；本模组自研**通用格式读写层**（§6.2） |
 
 **必须自写**（Core 内没有）：
 
@@ -60,6 +62,7 @@
 | 启停（文件重命名）+ 顺序表 | 全新（§四） |
 | 第三方注册契约 + 初始化调度器 | 全新（`OpenNestModMenu.API`） |
 | 调试面板 | 自写（用拷来的 `FrameProfiler`） |
+| **通用配置兼容层**（适配各模组的 cfg 格式与社区惯例） | 全新（§6.2）；不拷任何具体模组的配置类 |
 | 文本输入 / 中文 IME | v1 **不做**（`CoopInputBox` 的 IME 复杂度不在 v1 承担）；数值用滑条/步进 |
 | 独立文件日志（`ModLog`） | v1 先用 `CoopLog` + 等级；需要时再拷 `src/OpenNestCoop/Logging/ModLog.cs` |
 
@@ -87,7 +90,7 @@
 - `IModMenuProvider` / `IModMenuPage` 契约 + `ModMenuRegistry` 门面（**本模组契约程序集 `OpenNestModMenu.API`**）
 - 加载器来源探测（`LoaderDetector`，见 §三）
 - 运行时清理 `AssetBundleIron.UnloadAll()`、销毁 Canvas、解 ESC blocker
-- 配置读写（**标准 INI**，格式对齐 `docs/CONFIG.md`；文件 `BepInEx/config/OpenNestModMenu.cfg`），首次运行生成默认、损坏回退默认
+- 配置：自研**通用格式读写层**（§6.2）；本模组自身配置写到**各加载器的社区惯例位置**（BepInEx 版 → `BepInEx\config\OpenNestModMenu.cfg`；MLL 版 → `<GameDir>\UserData\OpenNestModMenu.cfg`），首次运行生成默认、损坏回退默认
 
 ### C. 打开/关闭入口（两者都要）
 - **热键**：`UnityEngine.InputSystem.Keyboard.current`。**默认 F6**，可配置。
@@ -123,6 +126,7 @@
 ### G. 统一设置中心（UI）
 - 分类页签（按模组 / 按功能域）+ 左侧列表 + 右侧内容区
 - 设置项控件族：布尔开关、数值（滑条或 ± 步进）、枚举（按钮循环）、动作按钮、重置默认、快捷键绑定
+- **第三方配置发现**：扫描各加载器惯例位置（`BepInEx\config\*.cfg`、`<GameDir>\UserData\*.cfg`、`UserData\MelonPreferences.cfg`）→ 按格式解析出节/键 → 直接生成设置页（无需模组适配；能识别格式即可，见 §6.2）
 - 搜索过滤；滚动列表 + **实例缓存**（IL2CPP 下每帧全遍历是掉帧元凶）
 - 确认弹窗（重置 / 需重启提示）；操作反馈走 `NativeUi.Toast`
 
@@ -265,7 +269,7 @@ ModMenu 自身仍应**尽量早加载**（在探测清单/顺序上更完整）�
 ### 5.1 结构与尺寸
 
 ```
-Canvas "OpenNestModMenu"（ScreenSpaceOverlay, sortingOrder 需与 CoopUIManager 协商, DontDestroyOnLoad）
+Canvas "OpenNestModMenu"（ScreenSpaceOverlay, sortingOrder=32765 可配, DontDestroyOnLoad）
 └─ Blocker（全屏半透明, raycastTarget=true, SetAsFirstSibling）
    └─ Panel（居中，建议 1000×640，纯色）
       ├─ TitleBar（标题 + 关闭按钮）
@@ -275,7 +279,10 @@ Canvas "OpenNestModMenu"（ScreenSpaceOverlay, sortingOrder 需与 CoopUIManager
 ```
 
 - `CanvasScaler`：`ScaleWithScreenSize` / 1920×1080 / `matchWidthOrHeight=0.5`（`UiKit.CreateCanvas` 已是此默认）
-- **`sortingOrder`**：`CoopUIManager` 用 32766。ModMenu 建议 **32764**（低于联机菜单）或与联机菜单协商；**须在实现时定死并写入本文档**（避免互相叠压）。
+- **`sortingOrder` 是什么**：UGUI `Canvas` 的绘制顺序值（**值大的画在上面**）。游戏原生 UI、联机菜单、本模组各自建独立的 `ScreenSpaceOverlay` Canvas，互相不知情，谁盖谁**只由这个值决定**。
+- **为什么需要定它**：值为 0（默认）时可能被游戏/其它模组的 UI 盖住（菜单显示不出来或点不到），所以必须给一个足够高的值。
+- **ModMenu 取值**：默认 **32765**（32767 = 游戏虚拟光标 Canvas，32766 = `CoopUIManager`；错开避免同值下顺序不确定），并暴露为配置项 `Ui.SortingOrder` 供用户调整。
+- ⚠️ **不承诺跨模组层级**：三个模组相互独立、无法约定；若用户觉得被盖住，改配置值即可（不写“协商”之类无法执行的约定）。
 - 字号：正文 15–16 / 标题 20；**一律固定字号 + `enableAutoSizing=false`**（历史结论：autoSizing 是"忽大忽小"根因）
 - 控件尺寸不按 `sprite.border` 反推（v1 无 sprite，天然规避）
 
@@ -309,11 +316,33 @@ Canvas "OpenNestModMenu"（ScreenSpaceOverlay, sortingOrder 需与 CoopUIManager
 - 反射遍历程序集/类型**逐项 try-catch**
 - 幂等初始化守卫（防桥环境重复加载）
 
-### 6.2 配置标准
-- **标准 INI**（格式对齐 `docs/CONFIG.md`），文件 `BepInEx\config\OpenNestModMenu.cfg`，UTF-8，支持热重载；模组自带 `CoopConfig` 同构实现（不引用 OpenNestCoop）
-- ModMenu 自身开关（热键 / `UseNativeSkin` / 顺序表 / 禁用表 / 日志等级）与**第三方设置项分节存放**（段 = 模组 Id）
-- **不用 JSON/Newtonsoft**（双端依赖不一致）
-- 解析失败/损坏 → 回退默认值并 `Warn`，不抛异常
+### 6.2 配置兼容标准（社区通用格式，不依赖任何具体模组）
+
+前提：**OpenNestCoop / OpenNestModMenu / 桥是三个相互独立的模组**，互不归属也不互引程序集。ModMenu 只做“**兼容通用格式与社区惯例**”。
+
+**本模组自身配置放哪**（跟加载器惯例）：
+
+| 平台 | 路径 | 格式 |
+|---|---|---|
+| BepInEx 版 | `BepInEx\config\OpenNestModMenu.cfg` | BepInEx cfg 写法（见下表） |
+| MelonLoader 版 | `<GameDir>\UserData\OpenNestModMenu.cfg` | MelonLoader 模组 cfg 写法（本机实例：`UserData\OpenNestCoop.cfg`） |
+
+**要能识别 / 读写的通用格式**（本机实测取样）：
+
+| 格式 | 本机实例 | 关键写法 | ModMenu 行为 |
+|---|---|---|---|
+| **BepInEx 插件 cfg** | `BepInEx\config\BepInEx.cfg` | `[Section]`（含子节 `[Harmony.Logger]`）、`## 描述`、`# Setting type: Boolean`、`# Default value: true`、`# Acceptable values: A, B`、`Key = Value` | **可读写**；注释元数据→**推断控件类型**（Boolean/枚举/数值），写回**只替换值** |
+| **MelonLoader 模组 cfg** | `UserData\OpenNestCoop.cfg` | `## 描述`、`[Section]`、`Key = Value`、`## 类型: bool \| 默认: true` | **可读写**；同一最小侵入策略 |
+| **MelonPreferences** | `UserData\MelonPreferences.cfg`（本机 0 字节） | 以**模组名/ID 为 category** 的偏好表 | 识别；有内容时按 category 分组展示 |
+| **MelonLoader Loader.cfg**（TOML 风格） | `UserData\Loader.cfg` | 小写 `key = "value"`、`#` 注释、双引号字符串 | **只读展示**（属加载器自身，不由 ModMenu 改写） |
+| 无法识别的自定义格式 | 如 `Models\soldier.cfg` | 各种 key=value 变体 | 只读展示 + “打开文件”按钮，**绝不改写** |
+
+**硬规则**：
+1. **最小侵入写回**：只改目标键的值，保留注释、空行、顺序、未识别键（不重排、不丢注释、不重写整文件）。
+2. **格式探测优先**：类型由注释标记推断；推断不出→按字符串/只读处理，不猜。
+3. **不认识就不改**：无法可靠解析的文件一律只读（宁可少做，不可损坏别人的配置）。
+4. **不改加载器自身配置**（`BepInEx.cfg` / `Loader.cfg`）：只读展示。
+5. 解析失败/损坏 → 回退默认值 + `Warn`，不抛异常；**不用 JSON/Newtonsoft**（双端依赖不一致）。
 
 ### 6.3 性能标准
 - 禁止每帧全场景扫描（`FindObjectsOfType`）；一律"实例缓存 + 低频刷新（3s 级）+ 场景变化刷新"
@@ -328,7 +357,7 @@ Canvas "OpenNestModMenu"（ScreenSpaceOverlay, sortingOrder 需与 CoopUIManager
 
 ### 6.5 兼容标准（与 OpenNestCoop / 桥共存）
 - 不新建 `EventSystem`；不抢 F7–F10；ESC blocker 成对
-- `sortingOrder` 不撞；`NativeUi` 桥接能力与 OpenNestCoop 保持等价
+- `sortingOrder` 错开已知值（32767 光标 / 32766 联机菜单）+ 可配置；**不共享静态状态**（本模组的 `NativeUi` 注册表 / `CoopLog` 与其它模组各管各的，见 §1.2）
 - 与 `BepInEx.MelonLoader.Loader` **零硬依赖**（只用公开 API + 反射探测）；**不读改 `BepInEx\interop`**（只读报告别名状态）
 - 不重复实现桥已有的兼容自检（`ModCompatScanner`），只展示其结论
 - MLL 清单采集在 `BepInExHost.Start()`（首帧）**之后**；不重排 MLL 已声明的 `MelonPriority`/依赖拓扑
@@ -374,11 +403,15 @@ src/OpenNestModMenu/
     UiKit.cs / INativeUiService.cs / UiSpriteBank.cs   → namespace OpenNestModMenu.UI
     CoopLog.cs / ILogger.cs                            → namespace OpenNestModMenu.Logging
     FrameProfiler.cs                                   → namespace OpenNestModMenu.Diagnostics
-    CoopConfig.cs                                      → namespace OpenNestModMenu.Config
   ModMenuRuntime.cs                  运行时根：启动/关停、服务装配、幂等守卫
+  Config/                            ★ 通用配置读写层（自研，见 §6.2）
+    IniDocument.cs                   行保留式 INI 模型（节/键/注释/空行原位保留，写回只替换值）
+    IniTypeInference.cs              由注释元数据推断控件类型（BepInEx `# Setting type` / 本项目 `## 类型:`）
+    ConfigFormatProbe.cs             格式探测（BepInEx cfg / ML 模组 cfg / MelonPreferences / TOML-lite）
+    ModConfigStore.cs                扫描各惯例位置 → 汇总为设置项；写回（最小侵入）+ 热重载
   Core/
-    ModMenuConfig.cs                 配置读写（key=value）+ 顺序表 + 禁用表 + UseNativeSkin + 热键
-    ModMenuPaths.cs                  目录解析（BepInEx\plugins、MLL根\Mods、日志目录、配置路径）
+    ModMenuConfig.cs                 本模组自身配置（热键 / Ui.SortingOrder / UseNativeSkin / 日志等级）
+    ModMenuPaths.cs                  目录解析（BepInEx\plugins、MLL根\Mods、UserData、config、日志目录）
     ModMenuBehaviour.cs              MonoBehaviour（Update：热键轮询/语言变化/场景变化，低频节流）
   Loaders/
     LoaderInfo.cs                    宿主/格式/桥 探测结果模型
