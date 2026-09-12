@@ -34,6 +34,10 @@ public class CoopBehaviour : MonoBehaviour
             try { CoopConfig.Tick(Time.unscaledDeltaTime); }
             catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CoopBehaviour] CoopConfig tick: {ex.Message}"); }
 
+            // 语言键文件热重载（OpenNestCoop.lang.ini，2s 轮询 mtime；改文案不用重启。见 docs/LOCALIZATION.md）
+            try { OpenNestCoop.Core.Loc.LocFile.Tick(Time.unscaledDeltaTime); }
+            catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CoopBehaviour] LocFile tick: {ex.Message}"); }
+
             // 自定义任务桥接驱动（OpenNestCore.Tasks → 游戏宿主）：单机驱动自定义任务状态机
             try { OpenNestCoop.GameSync.OncMissionBridge.Update(Time.unscaledDeltaTime); }
             catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CoopBehaviour] OncMission Update: {ex.Message}"); }

@@ -9,6 +9,8 @@
 > `GameSync/ButtonClickSync.cs`）；实体路径来自 F10 交互工具实测（2026-09-12 用户提供）。
 >
 > **更新记录**：
+> - 2026-09-12（二）新增局域网联机相关项：`[Identity] FakeId`（首次自动生成并**写回本文件**）、`[Identity] Name`、
+>   `[LAN] Port`、`[LAN] LastHost`；详见 `docs/LAN.md`。
 > - 2026-09-12 建档：选型（标准 INI vs BepInEx `ConfigFile` vs MelonPreferences）、路径/格式、3 个设置项、热重载、扩展步骤、双端一致性。
 
 ---
@@ -32,11 +34,14 @@
 | 都不存在（便携/非标准部署） | `<persistentDataPath>/OpenNestCoop.cfg` | 兜底（`Application.persistentDataPath`） |
 
 > 解析顺序见 `CoopConfig.ResolvePath()`：标准目录存在才用，否则回退 persistentDataPath，最后回退 CWD。
+>
+> ℹ️ **同目录还有一个界面文案文件** `OpenNestCoop.lang.ini`（语言键，2 秒热重载）：
+> 它也是标准 INI 格式，但职责是“界面文案”，见 `docs/LOCALIZATION.md`。
 
 ## 二、文件格式（首次运行自动生成）
 
 ```ini
-## Open Nest Co-op v0.2.1-Alpha-1 配置文件
+## Open Nest Co-op v0.2.1-Alpha-2 配置文件
 ## 本文件由模组自动生成：新增设置项会自动补进来；改动**无需重启**（约 2 秒内热重载）。
 ## 布尔写法：true / false（也接受 1/0、on/off、yes/no）。
 ## ⚠️ 这些开关是本端行为开关，不参与握手协商——同一局两端请保持一致，否则该功能会表现为不同步。
@@ -71,6 +76,10 @@ CalculateButtonSync = false
 | `Sync` | `CatSync` | bool | `true` | 猫同步总开关（主机 AI 状态广播 / 客机位置偏差硬同步 / 猫交互事件 106+133、V2 `v2/cat/*`） | `CatSync.Tick/OnPacket/OnLocalCatEvent`；`CatSyncV2.Tick/OnPacket/OnLocalCatEvent/ReproduceCatEvent` |
 | `Sync` | `RecordPlayerSync` | bool | `true` | 唱片机同步开关（播放中/曲目/音量/槽内唱片视觉插入） | `RecordPlayerSync.Tick/OnState/OnCmd/BuildRecordPlayerSnapshot/ApplyRecordPlayerSnapshot`；`RecordPlayerSyncV2.Tick/OnPacket/OnLateJoin` |
 | `Interactables` | `CalculateButtonSync` | bool | `false` | `Artillery Computer Console/Calculate Universal Button` 点击同步（点击复现 + 4 toggler 状态轮询） | `ButtonClickSync.ShouldTrack` 显式名字匹配 |
+| `Identity` | `FakeId` | string | 空（首次自动生成） | **局域网/无 Steam 时的身份**（高 16 位固定 `0xFACE`，其余随机） | `Core/Identity.cs` → `CoopConfig.FakeId`（懒生成 + 落盘） |
+| `Identity` | `Name` | string | 空 | 联机显示名（名单/聊天）；空 = Steam 昵称 → `Player<FakeID 后4位>` | `Identity.LocalName()` |
+| `LAN` | `Port` | int | `29507` | 局域网端口（主机 TCP 监听 + UDP 发现；客机默认连它） | `NetManager.LanJoinPort` / `LanDiscovery` |
+| `LAN` | `LastHost` | string | 空 | 上次加入的局域网地址（界面预填；加入成功时自动写回） | `NetManager.JoinLanRoom` |
 
 > ⚠️ `CalculateButtonSync` **默认关**（2026-09-12 新增，未实测）；开启需**双端**都设为 `true`。
 > 唱片**物品位置**（拿起/放下）由 `RecordItemSync` 负责，**不受** `RecordPlayerSync` 影响。

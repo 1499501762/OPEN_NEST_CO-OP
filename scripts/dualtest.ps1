@@ -1,6 +1,8 @@
 # Open Nest Co-op - dual-instance test launcher.
 # Usage:
 #   .\scripts\dualtest.ps1 -Local              # same-machine, NO Steam (TCP loopback)
+#   .\scripts\dualtest.ps1 -Lan                 # same-machine LAN mode (TCP 0.0.0.0 bind, --lan)
+#   .\scripts\dualtest.ps1 -Lan -LanIp 192.168.1.5   # LAN mode against another machine
 #   .\scripts\dualtest.ps1                      # two Steam sessions (--autohost/--autojoin)
 #   .\scripts\dualtest.ps1 -HostOnly            # only start host
 #   .\scripts\dualtest.ps1 -ClientOnly          # only start client
@@ -27,6 +29,8 @@ param(
     [switch]$ClientOnly,
     [string]$LobbyFile,
     [switch]$Local,
+    [switch]$Lan,
+    [string]$LanIp = "127.0.0.1",
     [int]$Port = -1,
     [int]$Lag = -1,
     [int]$LagJitter = -1,
@@ -99,6 +103,19 @@ function Start-Game {
     Start-Process -FilePath $ExePath -ArgumentList $fullArg -WorkingDirectory (Split-Path $ExePath)
 }
 
+# Wait until a TCP port accepts connections (host ready), up to 60s.
+function Wait-PortOpen {
+    param([int]$WaitPort, [string]$Addr = "127.0.0.1")
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        $c = New-Object System.Net.Sockets.TcpClient
+        try { $c.Connect($Addr, $WaitPort); $c.Close(); return $true }
+        catch { $c.Close(); Start-Sleep -Milliseconds 500 }
+    }
+    Write-Host "Timed out waiting for $Addr`:$WaitPort" -ForegroundColor Yellow
+    return $false
+}
+
 if ($Local) {
     # ---- Local TCP loopback mode (NO Steam) ----
     Write-Host "== LOCAL mode (no Steam), port $Port ==" -ForegroundColor Magenta
@@ -114,18 +131,37 @@ if ($Local) {
         if (-not (Test-Path $clientExe)) { Write-Host "Client game exe not found: $clientExe" -ForegroundColor Yellow; exit 1 }
         # Wait until host port is open (client retries internally too)
         Write-Host "Waiting for host port $Port to open..." -ForegroundColor Yellow
-        $deadline = (Get-Date).AddSeconds(60)
-        while ((Get-Date) -lt $deadline) {
-            $c = New-Object System.Net.Sockets.TcpClient
-            try { $c.Connect("127.0.0.1", $Port); $c.Close(); break }
-            catch { $c.Close(); Start-Sleep -Milliseconds 500 }
-        }
-        Write-Host "Host port open. Starting client..." -ForegroundColor Green
+        Wait-PortOpen $Port
         Start-Game $clientExe "--local join --localport $Port"
     }
     Write-Host ""
     Write-Host "Local dual-instance launched (host + client on this machine, no Steam)." -ForegroundColor Green
     Write-Host "Both game processes can share one Steam session now -- they bypass Steam for P2P." -ForegroundColor Green
+    exit 0
+}
+
+if ($Lan) {
+    # ---- LAN mode (TCP, 0.0.0.0 bind on host; no Steam lobby) ----
+    # Same command line the in-game LAN tab uses: --lan host / --lan join --lanip <ip>.
+    # Default LanIp=127.0.0.1 -> loopback through the 0.0.0.0 listener (single-machine test).
+    Write-Host "== LAN mode (TCP), port $Port, join target $LanIp ==" -ForegroundColor Magenta
+    if (-not $ClientOnly) {
+        Start-Game $hostExe "--lan host --localport $Port"
+    }
+    if (-not $HostOnly) {
+        if (-not $ClientGame) {
+            Write-Host "No client game path (-ClientGame). LAN mode needs a second install to launch the client." -ForegroundColor Yellow
+            exit 1
+        }
+        $clientExe = Join-Path $ClientGame $Exe
+        if (-not (Test-Path $clientExe)) { Write-Host "Client game exe not found: $clientExe" -ForegroundColor Yellow; exit 1 }
+        Write-Host "Waiting for host port $Port to open..." -ForegroundColor Yellow
+        Wait-PortOpen $Port
+        Start-Game $clientExe "--lan join --lanip $LanIp --localport $Port"
+    }
+    Write-Host ""
+    Write-Host "LAN dual-instance launched (host binds 0.0.0.0:$Port, client connects to ${LanIp}:$Port)." -ForegroundColor Green
+    Write-Host "Windows Firewall may prompt on first run -- allow it (private networks)." -ForegroundColor Yellow
     exit 0
 }
 

@@ -61,7 +61,14 @@ public class CoopUIManager : MonoBehaviour
     private CoopInputBox _roomNameBox;
     private CoopInputBox _roomPasswordBox;
     private CoopInputBox _joinPasswordBox;
-    private int _activeBoxKind;             // 当前聚焦输入框种类（1=房间名 2=密码 3=弹窗密码；0=无）
+    private CoopInputBox _lanHostBox;       // 局域网：主机 IP/机器名（kind=4）
+    private CoopInputBox _lanPortBox;       // 局域网：端口（kind=5）
+    private CoopInputBox _lanNameBox;       // 局域网：自定义用户名（kind=6）
+    /// <summary>未联机时的选项卡（2026-09-12 用户要求“局域网在原有菜单上独立用另外的选项卡”）：0=Steam 大厅 1=局域网。</summary>
+    private int _idleTab;
+    /// <summary>局域网扫描节流（秒）：局域网选项卡打开时周期扫描。</summary>
+    private float _lanScanAt;
+    private int _activeBoxKind;             // 当前聚焦输入框种类（1=房间名 2=密码 3=弹窗密码 4=局域网IP 5=局域网端口 6=局域网用户名；0=无）
     private string _chat = "";
     private bool _typing;
     private float _focusAt = -1f; // 最近一次聚焦时间（回车提交防抖用）
@@ -138,6 +145,25 @@ public class CoopUIManager : MonoBehaviour
         try { img.color = new Color(0.10f, 0.12f, 0.16f, 1f); } catch { }
     }
 
+    /// <summary>复制文本到系统剪贴板（局域网 IP 一键复制；同时弹 toast 提示）。失败只日志，不抛。</summary>
+    public static void CopyToClipboard(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        try
+        {
+            GUIUtility.systemCopyBuffer = text;
+            CoopRuntime.LogSource?.LogInfo($"[UI] clipboard copy '{text}'");
+            try { OpenNestCore.UI.NativeUi.Toast(CoopLoc.Copied, text, 2f); } catch { }
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] CopyToClipboard: {ex.Message}"); }
+    }
+
+    /// <summary>读系统剪贴板（局域网 IP 一键粘贴）。失败/空 → 空串。</summary>
+    public static string ReadClipboard()
+    {
+        try { return GUIUtility.systemCopyBuffer ?? ""; } catch { return ""; }
+    }
+
     /// <summary>输入框聚焦（CoopInputBox.Focus 调用）：登记种类 + 唤起 IME 锚点 + 重置首字符缓冲。</summary>
     public static void OnInputFocused(int kind)
     {
@@ -199,6 +225,18 @@ public class CoopUIManager : MonoBehaviour
 
         try { PollInput(); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] PollInput: {ex.Message}"); }
+
+        // 局域网选项卡：打开时周期扫描（3s）+ 过期条目清理（发现是尽力而为，不能影响帧率）
+        try
+        {
+            var net0 = CoopRuntime.Net;
+            if (_menuOpen && net0 != null && net0.State == SessionState.Idle && _idleTab == 1)
+            {
+                OpenNestCoop.Net.LanDiscovery.Tick();
+                if (Time.unscaledTime - _lanScanAt >= 3f) { _lanScanAt = Time.unscaledTime; net0.ScanLan(); }
+            }
+        }
+        catch { }
 
         // 待定首字符处理（消除拼音首键闪烁）：组合开始 → 丢弃（拼音）；否则缓冲 2 帧后追加（英文）并进快模式
         try { ProcessPendingChar(); }
@@ -503,6 +541,12 @@ public class CoopUIManager : MonoBehaviour
             sb.Append(_roomName).Append('|');
             sb.Append(_roomPassword).Append('|');        // 密码输入实时刷新（bug 修复：之前漏了 → 输入不更新界面）
             sb.Append(_activeBoxKind).Append('|'); // 当前聚焦输入框种类（切换即重建，光标跟随）
+            sb.Append(_idleTab).Append('|');       // 未联机选项卡（Steam/局域网切换即重建）
+            sb.Append(net.LanJoinHost).Append('|');
+            sb.Append(net.LanJoinPort).Append('|');
+            sb.Append(net.LanLocalName).Append('|');   // 局域网自定义用户名输入实时刷新
+            sb.Append(net.LanScanning ? 1 : 0).Append('|');
+            try { var lr = net.LanRooms; sb.Append(lr.Count); foreach (var r in lr) sb.Append('|').Append(r.Host).Append(':').Append(r.Port).Append(':').Append(r.Players); } catch { }
             sb.Append(_passwordDialog ? 1 : 0).Append('|'); // 密码弹窗开关
             sb.Append(_joinPassword).Append('|');        // 弹窗密码输入实时刷新
             sb.Append(_chat).Append('|');
@@ -1151,7 +1195,11 @@ public class CoopUIManager : MonoBehaviour
         y += 6;
 
         if (net.State == SessionState.Idle)
-            BuildIdle(net, ref y);
+        {
+            BuildIdleTabs(net, ref y);            // 选项卡：Steam 大厅 / 局域网（2026-09-12）
+            if (_idleTab == 1) BuildLan(net, ref y);
+            else BuildIdle(net, ref y);
+        }
         else
             BuildLobby(net, ref y);
         // 聊天面板由 Update 独立驱动（ChatKey 变化时重建），不在此处重建
@@ -1162,6 +1210,159 @@ public class CoopUIManager : MonoBehaviour
         var t = MakeText(_content, text, 12, y, PW - 24, 20, 14, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left);
         t.richText = true;
         y += 22;
+    }
+
+    /// <summary>未联机时的选项卡条：Steam 大厅 / 局域网联机（2026-09-12 用户要求局域网独立一个选项卡）。</summary>
+    private void BuildIdleTabs(NetManager net, ref float y)
+    {
+        float halfW = (PW - 24f) / 2f - 4f;
+        // ⚠️ 2026-09-12：标记用纯 ASCII 的 "> " —— 原来用 Unicode 三角符（▸）在游戏字体里缺字 → 显示成方框。
+        MakeButton(_content, _idleTab == 0 ? $"<color=#8f8>> {CoopLoc.TabSteam}</color>" : CoopLoc.TabSteam,
+            12, y, halfW, 26, () => { if (_idleTab != 0) { _idleTab = 0; Rebuild(); } });
+        MakeButton(_content, _idleTab == 1 ? $"<color=#8f8>> {CoopLoc.TabLan}</color>" : CoopLoc.TabLan,
+            12 + halfW + 8, y, halfW, 26, () => { if (_idleTab != 1) { _idleTab = 1; Rebuild(); } });
+        y += 32;
+    }
+
+    /// <summary>局域网选项卡内容（建房 / 加入 / 房间扫描 / 本机 IP / 身份）。见 docs/LAN.md。</summary>
+    private void BuildLan(NetManager net, ref float y)
+    {
+        // 身份（局域网无 Steam 时 = 配置里的 FakeID；有 SteamID 则优先用 SteamID）
+        var idT = MakeText(_content, $"{CoopLoc.LanIdentity}: <color=#8cf>{OpenNestCoop.Core.Identity.Tag(net.LocalIdentity)}</color>", 12, y, PW - 24, 20, 13, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left);
+        idT.richText = true;
+        y += 24;
+
+        // 自定义用户名（局域网；留空 = 自动：配置 [Identity] Name → Steam 昵称 → Player<FakeID后4位>）
+        var nameT = MakeText(_content, $"{CoopLoc.LanName}: <color=#aaa>{net.LocalDisplayName}</color>", 12, y, PW - 24, 20, 13, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left);
+        nameT.richText = true;
+        y += 22;
+        _lanNameBox = CoopInputBox.Create(_content, 12, y, PW - 24, 26, 6, false, $"({OpenNestCoop.Core.Identity.LocalName()})",
+            v => net.LanLocalName = v, () => Submit());
+        _lanNameBox.Value = net.LanLocalName;
+        y += 32;
+
+        MakeText(_content, CoopLoc.RoomNameLabel, 12, y, 120, 20, 14, Color.white, TextAlignmentOptions.Left); y += 24;
+        _roomNameBox = CoopInputBox.Create(_content, 12, y, PW - 24, 26, 1, false, CoopLoc.RoomNamePlaceholder,
+            v => _roomName = v, () => Submit());
+        _roomNameBox.Value = _roomName;
+        y += 32;
+
+        MakeText(_content, CoopLoc.RoomPassword, 12, y, 160, 20, 14, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left); y += 24;
+        _roomPasswordBox = CoopInputBox.Create(_content, 12, y, PW - 24, 26, 2, true, CoopLoc.RoomPasswordPlaceholder,
+            v => _roomPassword = v, () => Submit());
+        _roomPasswordBox.Value = _roomPassword;
+        y += 32;
+
+        MakeButton(_content, "-", 12, y, 26, 24, () => net.PendingMaxPlayers = Mathf.Max(2, net.PendingMaxPlayers - 1));
+        MakeText(_content, $"{CoopLoc.MaxPlayers}: {net.PendingMaxPlayers}", 46, y, 200, 24, 14, Color.white, TextAlignmentOptions.Left);
+        MakeButton(_content, "+", PW - 40, y, 26, 24, () => net.PendingMaxPlayers = Mathf.Min(8, net.PendingMaxPlayers + 1));
+        y += 30;
+
+        // 端口（主机监听 / 客机连接 / UDP 发现；可在配置文件 [LAN] Port 改默认值）
+        MakeText(_content, CoopLoc.LanPortLabel, 12, y, 60, 24, 14, Color.white, TextAlignmentOptions.Left);
+        _lanPortBox = CoopInputBox.Create(_content, 62, y, 96, 24, 5, false, "29507",
+            v => { if (int.TryParse(v, out var p) && p > 0 && p < 65536) net.LanJoinPort = p; }, () => Submit());
+        _lanPortBox.Value = net.LanJoinPort.ToString();
+        y += 32;
+
+        float createW = 240f;
+        MakeButton(_content, CoopLoc.LanCreate, (PW - createW) / 2f, y, createW, 34, () =>
+        {
+            net.PendingLobbyName = string.IsNullOrWhiteSpace(_roomName) ? CoopLoc.DefaultRoomName : _roomName;
+            net.PendingPassword = _roomPassword;
+            net.CreateLanRoom();
+        });
+        y += 42;
+
+        // 本机 IP（主机建房后告诉队友连哪个）+ 一键复制 ip:port
+        try
+        {
+            var ips = OpenNestCoop.Net.LanTransport.LocalIPv4();
+            if (ips.Count > 0)
+            {
+                string ipPort = ips[0] + ":" + net.LanJoinPort;
+                var ipT = MakeText(_content, $"{CoopLoc.LanMyIp}: <color=#8f8>{string.Join(" / ", ips)}</color>:{net.LanJoinPort}", 12, y, PW - 96, 20, 13, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left);
+                ipT.richText = true;
+                MakeButton(_content, CoopLoc.Copy, PW - 74, y, 62, 20, () => CopyToClipboard(ipPort));
+            }
+        }
+        catch { }
+
+        // 加入区：主机 IP（支持一键粘贴）+ 加入按钮
+        MakeText(_content, CoopLoc.LanIpLabel, 12, y, PW - 110, 20, 14, Color.white, TextAlignmentOptions.Left);
+        MakeButton(_content, CoopLoc.Paste, PW - 88, y, 76, 20, () =>
+        {
+            var clip = ReadClipboard().Trim();
+            if (clip.Length > 0)
+            {
+                // 允许首接粘贴 "ip:port"（自动拆成 IP + 端口）
+                int ci = clip.IndexOf(':');
+                if (ci > 0 && int.TryParse(clip.Substring(ci + 1), out var p2) && p2 > 0 && p2 < 65536)
+                {
+                    net.LanJoinHost = clip.Substring(0, ci);
+                    net.LanJoinPort = p2;
+                }
+                else net.LanJoinHost = clip;
+            }
+        });
+        y += 24;
+        _lanHostBox = CoopInputBox.Create(_content, 12, y, PW - 130, 26, 4, false, CoopLoc.IpPlaceholder,
+            v => net.LanJoinHost = v, () => Submit());
+        _lanHostBox.Value = net.LanJoinHost;
+        MakeButton(_content, CoopLoc.Join, PW - 106, y, 94, 26, () =>
+        {
+            net.LanJoinHost = (net.LanJoinHost ?? "").Trim();
+            net.PendingPassword = _roomPassword;   // 有密码房间：用本页密码框的值（主机仍会权威校验）
+            net.JoinLanRoom();
+        });
+        y += 32;
+
+        // 房间列表（UDP 广播发现）+ 扫描
+        MakeButton(_content, CoopLoc.LanScan, 12, y, 150, 26, () => net.ScanLan());
+        if (net.LanScanning)
+            MakeText(_content, CoopLoc.LanScanning, 170, y, 130, 26, 13, new Color(0.8f, 0.85f, 0.9f), TextAlignmentOptions.Left);
+        y += 32;
+
+        var rooms = net.LanRooms;
+        if (rooms == null || rooms.Count == 0)
+        {
+            MakeText(_content, CoopLoc.LanNoRooms, 12, y, PW - 24, 20, 13, new Color(0.6f, 0.65f, 0.7f), TextAlignmentOptions.Left); y += 26;
+        }
+        else
+        {
+            foreach (var room in rooms)
+            {
+                if (y > PH - 70) break;
+                string ver = string.IsNullOrEmpty(room.Version)
+                    ? "<color=#ff6b6b>?</color>"
+                    : (room.Version == NetConfig.Version
+                        ? $"<color=#8f8>v{room.Version}</color>"
+                        : $"<color=#ff6b6b>v{room.Version} {CoopLoc.LanMismatch}</color>");
+                string lockTag = room.HasPassword ? CoopLoc.Locked + " " : "";
+                var rt = MakeText(_content, $"{lockTag}{room.Name} ({room.Players}/{room.MaxPlayers}) {ver}  <color=#aaa>{room.Host}</color>",
+                    12, y, PW - 172, 22, 13, Color.white, TextAlignmentOptions.Left);
+                rt.richText = true;
+                string roomIp = room.Host + ":" + room.Port;
+                MakeButton(_content, CoopLoc.Copy, PW - 146, y, 56, 22, () => CopyToClipboard(roomIp));
+                MakeButton(_content, CoopLoc.Join, PW - 84, y, 72, 22, () =>
+                {
+                    net.LanJoinHost = room.Host;
+                    net.LanJoinPort = room.Port;
+                    if (room.HasPassword && !net.VerifyLanPassword(room, _roomPassword))
+                    {
+                        net.LastError = $"{CoopLoc.PasswordRequired}: {room.Name}";
+                        return;
+                    }
+                    net.PendingPassword = _roomPassword;
+                    net.JoinLanRoom();
+                });
+                y += 26;
+            }
+        }
+
+        var hint = MakeText(_content, CoopLoc.LanHint, 12, y + 4, PW - 24, 34, 12, new Color(0.6f, 0.65f, 0.7f), TextAlignmentOptions.Left);
+        hint.richText = true;
+        RestoreActiveBox();
     }
 
     private void BuildIdle(NetManager net, ref float y)
@@ -1211,11 +1412,11 @@ public class CoopUIManager : MonoBehaviour
             foreach (var info in net.Browser)
             {
                 if (y > PH - 24) break;
-                var lockTag = info.HasPassword ? "[锁]" : "";
+                var lockTag = info.HasPassword ? CoopLoc.Locked : "";
                 string loaderTag = info.Loader == "MelonLoader" ? "[ML]" : info.Loader == "BepInEx" ? "[BE]" : "";
                 string ownerTag = info.OwnerName.Length > 0 ? $" <color=#aaa>by {info.OwnerName}</color>" : "";
                 string verTag = string.IsNullOrEmpty(info.Version)
-                    ? "<color=#ff6b6b>旧版?</color>"
+                    ? $"<color=#ff6b6b>{CoopLoc.OldVersion}</color>"
                     : (info.Version == NetConfig.Version
                         ? $"<color=#8f8>v{info.Version}</color>"
                         : $"<color=#ff6b6b>v{info.Version}</color>");
@@ -1771,7 +1972,13 @@ public class CoopUIManager : MonoBehaviour
             if (_passwordDialog) { ConfirmPasswordJoin(); return; }
             net.PendingLobbyName = string.IsNullOrWhiteSpace(_roomName) ? CoopLoc.DefaultRoomName : _roomName;
             net.PendingPassword = _roomPassword;
-            net.CreateLobby();
+            if (_idleTab == 1)
+            {
+                // 局域网选项卡：回车 = 焦点在 IP 框时加入，否则建房
+                if (_activeBoxKind == 4) { net.LanJoinHost = (net.LanJoinHost ?? "").Trim(); net.JoinLanRoom(); }
+                else net.CreateLanRoom();
+            }
+            else net.CreateLobby();
             StopTyping();
         }
         else
@@ -1899,7 +2106,7 @@ public class CoopUIManager : MonoBehaviour
     private void RestoreActiveBox()
     {
         if (!_typing || _activeBoxKind == 0) return;
-        CoopInputBox[] boxes = { _roomNameBox, _roomPasswordBox, _joinPasswordBox };
+        CoopInputBox[] boxes = { _roomNameBox, _roomPasswordBox, _joinPasswordBox, _lanHostBox, _lanPortBox, _lanNameBox };
         foreach (var b in boxes)
         {
             if (b != null && b.Kind == _activeBoxKind)

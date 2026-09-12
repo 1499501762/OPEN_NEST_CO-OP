@@ -7,7 +7,7 @@
     <AssemblyName>OpenNestCoop</AssemblyName>
     <RootNamespace>OpenNestCoop</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.2.1-Alpha-1</Version>
+    <Version>0.2.1-Alpha-2</Version>
     <!-- 游戏目录：优先取 MSBuild 环境变量 GameDir（scripts/env.ps1 → deploy.ps1 设置）；
          未设置时回退到本机默认路径（IDE 直接构建仍可用；其他机器请改这里或设环境变量）。 -->
     <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>

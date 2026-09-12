@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using OpenNestCoop.Core;
+using OpenNestCoop.Core.Loc;
 using OpenNestCoop.GameSync;
 using LiteNetLib.Utils;
 #if !MELONLOADER
@@ -36,7 +37,7 @@ public class NetManager
     public List<LobbyInfo> Browser => Lobby.Browser;
 
     public bool MenuOpen = true;
-    public string PendingLobbyName = "Nest 联机房间";
+    public string PendingLobbyName = "";   // 默认房间名在 Init 里按语言键填充（DefaultRoomName）
     public int PendingMaxPlayers = NetConfig.DefaultMaxPlayers;
     /// <summary>创建房间密码 / 加入有密码房间时用户输入的密码（明文，握手时带过去由主机校验 hash）。</summary>
     public string PendingPassword = "";
@@ -55,7 +56,28 @@ public class NetManager
     /// <summary>本地模式 host 的 peerId（host=1，client 记住 host=1）。</summary>
     public const ulong LocalHostPeerId = 1;
 
-    public ulong HostSteamId => LocalMode ? LocalHostPeerId : Lobby.HostSteamId;
+    // ⚠️ 2026-09-12 新增：**局域网联机**（TCP 直连，不经 Steam 大厅）——见 docs/LAN.md
+    /// <summary>局域网模式（主机监听任意网卡 / 客机 TCP 直连）。身份规则：SteamID 优先，拿不到则用配置里的 FakeID。</summary>
+    public bool LanMode;
+    /// <summary>非 Steam 传输模式（本地回环测试 / 局域网）：大厅/邀请/浏览/成员同步等 Steam 操作一律跳过。</summary>
+    public bool NonSteam => LocalMode || LanMode;
+    /// <summary>局域网目标主机（IP 或机器名）——客机加入时输入。</summary>
+    public string LanJoinHost = "";
+    // 局域网断线（后台线程只入队/置标志 → 主线程处理；见 UpdateLocal）
+    private readonly System.Collections.Concurrent.ConcurrentQueue<ulong> _lanPeersGone = new();
+    private volatile bool _lanHostLost;
+    /// <summary>局域网端口（主机监听 / 客机连接 / UDP 发现）；默认取配置 `[LAN] Port`。</summary>
+    public int LanJoinPort = NetConfig.LocalDefaultPort;
+    /// <summary>局域网自定义用户名（UI 输入，空 = 用配置 `[Identity] Name` → Steam 昵称 → `Player<FakeID后4位>`）。
+    /// 建房/加入时生效并写回配置（下次预填）。**允许重名**（身份才是唯一键）。</summary>
+    public string LanLocalName = "";
+    /// <summary>本端联机显示名（局域网：优先 UI 里填的名字）。</summary>
+    public string LocalDisplayName => string.IsNullOrWhiteSpace(LanLocalName) ? Core.Identity.LocalName() : LanLocalName.Trim();
+    /// <summary>本端在联机里的身份：真实 SteamID 优先（即使局域网模式，只要 Steam 就绪就用 SteamID）；
+    /// 拿不到则用配置里的 FakeID（首次自动生成并落盘，见 <see cref="Core.Identity"/>）。</summary>
+    public ulong LocalIdentity => Core.Identity.Local;
+
+    public ulong HostSteamId => NonSteam ? LocalHostPeerId : Lobby.HostSteamId;
 
     // 合包缓冲（不可靠周期状态：帧末合并成一个 UDP 包，省 Steam 每包约 30B 头）
     private readonly List<byte[]> _broadcastQueue = new();
@@ -66,7 +88,7 @@ public class NetManager
     private readonly List<byte[]> _hostQueueU = new();
     // ⚠️ 合包上限由 NetworkGovernor 分级动态控制（High=256 与原 BatchMaxItems 一致）——
     // 负载高（低档）→ 上限缩小 → 超限丢弃（RecordDrop 喂回评估器触发降频）。
-    public bool IsHost => LocalMode ? (State == SessionState.Hosting) : Lobby.IsHost;
+    public bool IsHost => NonSteam ? (State == SessionState.Hosting) : Lobby.IsHost;
 
     // ⚠️ 2026-08-26：通用大包分片（Steam P2P 单包硬性限制）——单子包超过阈值自动切成多段 Fragment，
     // 接收端重组。Steam unreliable 单包 ~1200B / reliable 1MB 是硬限制，超过整包被拒收/丢。
@@ -120,11 +142,23 @@ public class NetManager
         if (!string.IsNullOrEmpty(rn)) PendingLobbyName = rn;
         PendingMaxPlayers = Math.Max(2, Math.Min(8, mp));
         PendingPassword = pwd ?? "";
+
+        // 局域网：端口 + 上次地址从配置预填（docs/CONFIG.md `[LAN]`）
+        try
+        {
+            LanJoinPort = Core.CoopConfig.LanPort > 0 ? Core.CoopConfig.LanPort : NetConfig.LocalDefaultPort;
+            LanJoinHost = Core.CoopConfig.LanLastHost ?? "";
+            LanLocalName = Core.CoopConfig.LocalName ?? "";
+            // 默认房间名：按语言键取（语言文件可改；LobbySettings 已有值则不覆盖）
+            if (string.IsNullOrWhiteSpace(PendingLobbyName)) PendingLobbyName = Loc("DefaultRoomName");
+        }
+        catch { }
     }
 
     public void Shutdown()
     {
-        try { if (State != SessionState.Idle) Lobby.LeaveLobby(); } catch { }
+        try { if (State != SessionState.Idle) LeaveSession(); } catch { }
+        try { LanDiscovery.StopAnnounce(); } catch { }
         State = SessionState.Idle;
     }
 
@@ -470,8 +504,8 @@ public class NetManager
 
     public void Update(float dt)
     {
-        // 本地回环模式（双开测试）：不经 Steam，直接驱动本地传输
-        if (LocalMode)
+        // 本地回环（双开测试）/ 局域网：不经 Steam 大厅，直接驱动对应传输
+        if (NonSteam)
         {
             UpdateLocal(dt);
             return;
@@ -531,15 +565,38 @@ public class NetManager
     /// <summary>本地回环模式驱动（双开测试，不经 Steam）。</summary>
     private void UpdateLocal(float dt)
     {
-        // 本地模式无 Steam：直接就绪 + 自动触发建房/加入（--local host / --local join）
-        SteamReady = true;
+        // 局域网：Steam 仍可能就绪（**身份优先 SteamID**），但大厅/邀请/成员同步一律不走 Steam
+        if (LanMode)
+        {
+            try { Steamworks.SteamAPI.RunCallbacks(); } catch { }
+            try { SteamReady = Steamworks.SteamAPI.IsSteamRunning() && Steamworks.SteamUser.GetSteamID().IsValid(); }
+            catch { SteamReady = false; }
+        }
+        else
+        {
+            SteamReady = true;   // 本地回环测试：不需要 Steam
+        }
         AutoJoin.TryStart(this);
+        // 局域网：主线程处理断线队列 / 主机失联（后台线程不做名单·UI 操作）
+        if (LanMode)
+        {
+            while (_lanPeersGone.TryDequeue(out var goneId)) ProcessLanPeerLeft(goneId);
+            if (_lanHostLost)
+            {
+                _lanHostLost = false;
+                LastError = Loc("ErrHostDisconnected");
+                CoopRuntime.LogSource?.LogInfo("[Net] LAN host connection lost → leave session");
+                LeaveSession();
+                return;
+            }
+        }
         if (Local == null || Local.SteamId == 0)
         {
             Local = new PlayerSession
             {
-                SteamId = LocalMode ? (LocalPeerIdOf()) : 0,
-                Name = LocalMode ? (IsHost ? "Host(local)" : "Client(local)") : "Steam initializing...",
+                SteamId = LanMode ? LocalIdentity : (LocalMode ? (LocalPeerIdOf()) : 0),
+                Name = LanMode ? LocalDisplayName
+                               : (LocalMode ? (IsHost ? Loc("LocalHostName") : Loc("LocalClientName")) : "Steam initializing..."),
                 IsLocal = true,
                 PlayerId = 255,
             };
@@ -1016,7 +1073,7 @@ public class NetManager
             }
             return;
         }
-        if (!SteamReady) { LastError = "Steam not ready yet, please try again later"; return; }
+        if (!SteamReady) { LastError = Loc("ErrSteamNotReady"); return; }
         LastError = "";
         _creatingLobby = true; // 创建是异步的，回调前 State 仍为 Idle，防重复创建多个大厅
         Lobby.CreateLobby(PendingLobbyName, PendingMaxPlayers, PendingPassword);
@@ -1025,8 +1082,8 @@ public class NetManager
     public void RefreshBrowser()
     {
         if (State != SessionState.Idle) return;
-        if (LocalMode) return;
-        if (!SteamReady) { LastError = "Steam not ready yet, please try again later"; return; }
+        if (NonSteam) return;
+        if (!SteamReady) { LastError = Loc("ErrSteamNotReady"); return; }
         Refreshing = true;
         Lobby.RefreshBrowser();
     }
@@ -1038,8 +1095,8 @@ public class NetManager
     public bool JoinRecentLobby()
     {
         if (State != SessionState.Idle) return false;
-        if (LocalMode) return false;
-        if (!SteamReady) { LastError = "Steam not ready yet, please try again later"; return false; }
+        if (NonSteam) return false;
+        if (!SteamReady) { LastError = Loc("ErrSteamNotReady"); return false; }
         var id = Core.LobbySettings.RecentLobbyId;
         if (id == 0) return false;
         LastError = "";
@@ -1050,6 +1107,7 @@ public class NetManager
     public bool JoinLobby(LobbyInfo info)
     {
         if (State != SessionState.Idle) return false;
+        if (LanMode) return false;      // 局域网走 JoinLanRoom（IP 直连）
         if (LocalMode)
         {
             LastError = "";
@@ -1060,11 +1118,11 @@ public class NetManager
             }
             return false;
         }
-        if (!SteamReady) { LastError = "Steam not ready yet, please try again later"; return false; }
+        if (!SteamReady) { LastError = Loc("ErrSteamNotReady"); return false; }
         // 有密码的房间必须已设置 PendingPassword（UI 弹输入框预校验后设置）
         if (info.HasPassword && string.IsNullOrEmpty(PendingPassword))
         {
-            LastError = "This room is password protected";
+            LastError = Loc("ErrPasswordProtected");
             return false;
         }
         LastError = "";
@@ -1079,14 +1137,24 @@ public class NetManager
 
     public void LeaveSession()
     {
-        if (LocalMode)
+        if (NonSteam)
         {
-            (Transport as LocalTransport)?.Dispose();
+            if (LocalMode) (Transport as LocalTransport)?.Dispose();
+            else StopLanSession();
             OnLobbyLeft();
             return;
         }
         Lobby.LeaveLobby();
         // OnLobbyLeft 会清理状态
+    }
+
+    /// <summary>结束局域网会话：停 UDP 应答 + 关 TCP 连接 + 清发现列表。</summary>
+    private void StopLanSession()
+    {
+        try { LanDiscovery.StopAnnounce(); } catch { }
+        try { (Transport as LanTransport)?.Dispose(); } catch { }
+        try { LanDiscovery.Clear(); } catch { }
+        LanMode = false;
     }
 
     // ---- 踢人 / 封禁 / 邀请 ----
@@ -1141,10 +1209,10 @@ public class NetManager
     /// <summary>打开 Steam 好友邀请对话框（Steam overlay）。非 Steam 模式（本地回环）不支持。</summary>
     public void InviteFriends()
     {
-        if (LocalMode)
+        if (NonSteam)
         {
-            LastError = "Local loopback mode does not support Steam invites";
-            CoopRuntime.LogSource?.LogInfo("[Net] local mode does not support Steam invite");
+            LastError = LocalMode ? Loc("ErrInviteUnsupportedLocal") : Loc("ErrInviteUnsupportedLan");
+            CoopRuntime.LogSource?.LogInfo($"[Net] invite not supported in {(LocalMode ? "local" : "LAN")} mode");
             return;
         }
         try
@@ -1165,7 +1233,7 @@ public class NetManager
     {
         WasKicked = true;
         string reason = "";
-        try { if (r != null && r.AvailableBytes > 0) reason = r.GetString(); } catch { }
+        try { if (r != null && r.AvailableBytes > 0) reason = LocalizeReason(r.GetString()); } catch { }
         if (reason.Length > 0)
         {
             LastError = reason;
@@ -1175,9 +1243,10 @@ public class NetManager
         {
             CoopRuntime.LogSource?.LogInfo("[Net] kicked by host");
         }
-        if (LocalMode)
+        if (NonSteam)
         {
-            (Transport as LocalTransport)?.Dispose();
+            if (LocalMode) (Transport as LocalTransport)?.Dispose();
+            else StopLanSession();
             OnLobbyLeft();
         }
         else
@@ -1200,7 +1269,7 @@ public class NetManager
             Local = new PlayerSession
             {
                 SteamId = 1,
-                Name = "Host(本地)",
+                Name = Loc("LocalHostName"),
                 IsLocal = true,
                 PlayerId = 0,
                 IsHost = true,
@@ -1223,7 +1292,7 @@ public class NetManager
             Local = new PlayerSession
             {
                 SteamId = 2,
-                Name = "Client(本地)",
+                Name = Loc("LocalClientName"),
                 IsLocal = true,
                 PlayerId = 255,
             };
@@ -1241,6 +1310,189 @@ public class NetManager
             CoopRuntime.LogSource?.LogInfo("[Net] local host got client connection, waiting for Hello...");
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Net] OnLocalClientConnected: {ex.Message}"); }
+    }
+
+    // ---- 局域网模式（TCP 直连，不经 Steam 大厅；见 docs/LAN.md） ----
+
+    /// <summary>局域网：从冲突身份派生一个唯一 id（高 16 位固定 0xFACE → 日志/UI 显示为 Fake#xxxx）。
+    /// 用于“同一台机器 + 同一 Steam 账号双开”或“两个客户端声称同一 SteamID/FakeID”的情况。</summary>
+    private ulong DeriveUniqueLanId(ulong baseId)
+    {
+        ulong seed = baseId & 0x0000FFFFFFFFFFFFUL;
+        for (ulong salt = 1; salt < 4096; salt++)
+        {
+            ulong cand = 0xFACE000000000000UL | ((seed + salt) & 0x0000FFFFFFFFFFFFUL);
+            if (Local != null && cand == Local.SteamId) continue;
+            bool used = false;
+            foreach (var p in Roster) if (p.SteamId == cand) { used = true; break; }
+            if (!used)
+            {
+                var lt = Transport as LanTransport;
+                if (lt != null && lt.HasPeer(cand)) continue;
+                return cand;
+            }
+        }
+        return 0xFACE00000000FFFFUL;
+    }
+
+    /// <summary>已发现的局域网房间（UI 列表用；后台扫描线程填充）。</summary>
+    public List<LanDiscovery.LanRoom> LanRooms => LanDiscovery.Rooms;
+    /// <summary>正在扫描局域网。</summary>
+    public bool LanScanning => LanDiscovery.Scanning;
+
+    /// <summary>扫描局域网房间（后台线程，不阻塞 UI）。同时探当前端口 + 默认端口（主机改了端口也能发现）。</summary>
+    public void ScanLan()
+    {
+        try
+        {
+            int p = LanJoinPort;
+            int d = Core.CoopConfig.LanPort > 0 ? Core.CoopConfig.LanPort : NetConfig.LocalDefaultPort;
+            if (d != p) LanDiscovery.Scan(new[] { p, d });
+            else LanDiscovery.Scan(p);
+        }
+        catch { }
+    }
+
+    /// <summary>局域网加入前的密码预校验（用发现包里的 hash；主机仍会权威校验，防绕过）。</summary>
+    public bool VerifyLanPassword(LanDiscovery.LanRoom room, string password)
+        => room == null || !room.HasPassword || NetConfig.HashPassword(password ?? "") == room.PasswordHash;
+
+    /// <summary>创建局域网房间：主机监听任意网卡（<see cref="LanJoinPort"/>）+ UDP 应答发现。
+    /// 身份用 <see cref="LocalIdentity"/>（SteamID 优先，否则 FakeID）。</summary>
+    public bool CreateLanRoom()
+    {
+        if (State != SessionState.Idle || _creatingLobby) return false;
+        try { Core.LobbySettings.Save(PendingLobbyName, PendingMaxPlayers, PendingPassword); } catch { }
+        LastError = "";
+        LanMode = true;
+        try
+        {
+            var lt = new LanTransport();
+            lt.PeerConnected += OnLanPeerConnected;
+            lt.PeerDisconnected += OnLanPeerDisconnected;
+            if (!lt.StartHost(LanJoinPort))
+            {
+                LanMode = false;
+                LastError = Loc("ErrLanPortInUse", LanJoinPort);
+                return false;
+            }
+            Transport = lt;
+            Local = new PlayerSession
+            {
+                SteamId = LocalIdentity,
+                Name = LocalDisplayName,
+                IsLocal = true,
+                IsHost = true,
+                PlayerId = 0,
+                Role = CrewRole.Commander,
+            };
+            PersistLanName();
+            CoopRuntime.LogSource?.LogInfo($"[Net] LAN host ready port={LanJoinPort} identity={LocalIdentity} ({Core.Identity.Tag(LocalIdentity)}) name='{Local.Name}'");
+            OnLobbyEntered();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LanMode = false;
+            LastError = Loc("ErrLanHostFailed", ex.Message);
+            CoopRuntime.LogSource?.LogWarning($"[Net] CreateLanRoom: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>加入局域网房间（TCP 直连；Hello 里声明身份）。成功返回 true（失败看 <see cref="LastError"/>）。</summary>
+    public bool JoinLanRoom()
+    {
+        if (State != SessionState.Idle) return false;
+        if (string.IsNullOrWhiteSpace(LanJoinHost)) { LastError = Loc("ErrLanNoIp"); return false; }
+        LastError = "";
+        LanMode = true;
+        try
+        {
+            var lt = new LanTransport();
+            lt.HostDisconnected += OnLanHostDisconnected;
+            if (!lt.Connect(LanJoinHost.Trim(), LanJoinPort))
+            {
+                LanMode = false;
+                LastError = Loc("ErrLanUnreachable", LanJoinHost.Trim(), LanJoinPort);
+                return false;
+            }
+            Transport = lt;
+            try { Core.CoopConfig.Set("LAN", "LastHost", LanJoinHost.Trim()); } catch { }   // 记住上次地址
+            try { LanDiscovery.Clear(); } catch { }
+            Local = new PlayerSession
+            {
+                SteamId = LocalIdentity,
+                Name = LocalDisplayName,
+                IsLocal = true,
+                PlayerId = 255,
+            };
+            PersistLanName();
+            CoopRuntime.LogSource?.LogInfo($"[Net] LAN client connected {LanJoinHost.Trim()}:{LanJoinPort} identity={LocalIdentity} ({Core.Identity.Tag(LocalIdentity)}) name='{Local.Name}'");
+            OnLobbyEntered();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LanMode = false;
+            LastError = Loc("ErrLanJoinFailed", ex.Message);
+            CoopRuntime.LogSource?.LogWarning($"[Net] JoinLanRoom: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>局域网：把 UI 里填的用户名写回配置（下次预填）。空值不写（保留配置里的值）。</summary>
+    private void PersistLanName()
+    {
+        try
+        {
+            var n = (LanLocalName ?? "").Trim();
+            if (n.Length > 0 && n != (Core.CoopConfig.LocalName ?? "")) Core.CoopConfig.Set("Identity", "Name", n);
+        }
+        catch { }
+    }
+
+    /// <summary>局域网主机：开始应答 UDP 查询（队友“扫描局域网”能看到本房间）。</summary>
+    private void StartLanAnnounce()
+    {
+        try
+        {
+            LanDiscovery.StartAnnounce(LanJoinPort, () =>
+                (PendingLobbyName, Roster.Count, PendingMaxPlayers, RoomPasswordHash()));
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Net] StartLanAnnounce: {ex.Message}"); }
+    }
+
+    /// <summary>局域网主机：新连接接入（尚未 Hello；peerId 是临时连接 id，Hello 后重绑为身份）。
+    /// ⚠️ 本回调在**后台读线程**触发——只允许日志（不碰名单/UI），否则 IL2CPP 跨线程访问 Unity 对象会崩。</summary>
+    private void OnLanPeerConnected(ulong tempPeerId)
+    {
+        CoopRuntime.LogSource?.LogInfo($"[Net] LAN peer connected (temp id {tempPeerId}), waiting for Hello...");
+    }
+
+    /// <summary>局域网主机：连接断开（后台线程）→ 只入队，真正的名单移除在主线程 <see cref="ProcessLanPeerLeft"/>。</summary>
+    private void OnLanPeerDisconnected(ulong peerId)
+    {
+        _lanPeersGone.Enqueue(peerId);
+    }
+
+    /// <summary>局域网客机：与主机断开（后台线程）→ 只置标志，主线程离开会话。</summary>
+    private void OnLanHostDisconnected() { _lanHostLost = true; }
+
+    /// <summary>局域网主机：在主线程移除离开的成员 + 广播新名单。</summary>
+    private void ProcessLanPeerLeft(ulong peerId)
+    {
+        try
+        {
+            PlayerSession gone = null;
+            foreach (var p in Roster) if (p.SteamId == peerId) { gone = p; break; }
+            if (gone == null) return;
+            Roster.Remove(gone);
+            BroadcastRoster();
+            RosterChanged?.Invoke();
+            CoopRuntime.LogSource?.LogInfo($"[Net] LAN peer {peerId} ({gone.Name}) left");
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Net] ProcessLanPeerLeft: {ex.Message}"); }
     }
 
     public void SendChat(string text)
@@ -1285,7 +1537,7 @@ public class NetManager
     {
         LastError = "";
         _creatingLobby = false;
-        bool isHost = LocalMode ? (Local != null && Local.IsHost) : Lobby.IsHost;
+        bool isHost = NonSteam ? (Local != null && Local.IsHost) : Lobby.IsHost;
         if (isHost)
         {
             State = SessionState.Hosting;
@@ -1296,13 +1548,15 @@ public class NetManager
             Roster.Add(Local);
             BroadcastRoster();
             // 自动建房（--autohost）：把 lobby id 写共享文件供 client 自动加入
-            if (!LocalMode) AutoJoin.OnHostEntered(this);
+            if (!NonSteam) AutoJoin.OnHostEntered(this);
+            // 局域网：开始应答 UDP 查询（队友的“扫描局域网”能看到本房间）
+            if (LanMode) StartLanAnnounce();
         }
         else
         {
             _joinedHostId = HostSteamId;
-            // 记录最近进入的房间（Steam 快速重连用）并持久化
-            if (!LocalMode)
+            // 记录最近进入的房间（Steam 快速重连用）并持久化；局域网/本地模式不走 Steam 大厅
+            if (!NonSteam)
             {
                 Core.LobbySettings.RecentLobbyId = Lobby.LobbyID.IsValid() ? (ulong)Lobby.LobbyID : 0;
                 Core.LobbySettings.Save(PendingLobbyName, PendingMaxPlayers, PendingPassword);
@@ -1315,6 +1569,8 @@ public class NetManager
             w.Put(NetConfig.HandshakeVersion); // 握手协议版本（4 = 含前导字节宽度 + 注册通道表）
             w.Put(NetConfig.Version);          // 模组版本号
             w.Put(PendingPassword ?? "");      // 房间密码（明文，主机按 hash 校验）
+            // 局域网：声明本端身份（SteamID 优先，否则 FakeID）——主机据此把传输 peerId 重绑到该身份
+            if (LanMode) w.Put(LocalIdentity);
             w.Put(Local.Name);
             // 注册通道（前导字节 1）：客户端把本端注册表附加在 Hello 上行，主机校验后下发权威表
             WriteChannelTable(w);
@@ -1343,6 +1599,8 @@ public class NetManager
     /// <summary>成员变化（加入/离开/主机变更）。</summary>
     private void OnMembersChanged()
     {
+        // 本地/局域网：成员变化由 Hello（加入）+ TCP 断开事件维护，不读 Steam 大厅
+        if (NonSteam) return;
         if (State == SessionState.Hosting)
         {
             SyncHostRoster();
@@ -1354,7 +1612,7 @@ public class NetManager
             {
                 if (_joinedHostId != 0)
                 {
-                    LastError = "Host has left the room";
+                    LastError = Loc("ErrHostLeft");
                     CoopRuntime.LogSource?.LogInfo("host left, returning to lobby");
                 }
                 Lobby.LeaveLobby();
@@ -1364,6 +1622,7 @@ public class NetManager
 
     private void SyncHostRoster()
     {
+        if (NonSteam) return;   // 局域网/本地：名单由 Hello/断线事件维护，无 Steam 大厅成员表
         var members = Lobby.GetMembers();
         bool changed = false;
 
@@ -1580,6 +1839,28 @@ public class NetManager
         }
     }
 
+    /// <summary>取语言键文案（界面/错误提示全上语言文件；见 docs/LOCALIZATION.md）。</summary>
+    private static string Loc(string key, params object[] args) => LocFile.Get(key, args);
+
+    /// <summary>把拒绝/踢出原因编码为语言键（`@Key` 或 `@Key|arg1|arg2`）——接收端按**本端语言**显示。
+    /// 旧端/非键文本（不以 @ 开头）原样传递，兼容。</summary>
+    private static string KeyedReason(string key, params object[] args)
+        => "@" + key + (args == null || args.Length == 0 ? "" : "|" + string.Join("|", args));
+
+    /// <summary>把收到的原因文本本地化：`@Key|a|b` → 本端语言的文案；普通文本原样返回。</summary>
+    private static string LocalizeReason(string raw)
+    {
+        if (string.IsNullOrEmpty(raw) || raw[0] != '@') return raw ?? "";
+        try
+        {
+            var parts = raw.Substring(1).Split('|');
+            if (parts.Length == 0 || string.IsNullOrEmpty(parts[0])) return raw;
+            if (parts.Length == 1) return Loc(parts[0]);
+            return Loc(parts[0], parts.Skip(1).Cast<object>().ToArray());
+        }
+        catch { return raw; }
+    }
+
     /// <summary>拒绝加入：发一条带原因的可信 Kick（对端显示原因后离开大厅）。</summary>
     private void RejectJoin(ulong from, string reason)
     {
@@ -1599,7 +1880,7 @@ public class NetManager
         if (_banned.Contains(from))
         {
             CoopRuntime.LogSource?.LogInfo($"[Net] rejected banned member join: {from}");
-            RejectJoin(from, "Banned");
+            RejectJoin(from, KeyedReason("RejectBanned"));
             return;
         }
 
@@ -1608,7 +1889,7 @@ public class NetManager
         int localScheme = OpenNestCoop.Net.AutoJoin.WantNewSync ? 1 : 0;
         if (remoteScheme != localScheme)
         {
-            RejectJoin(from, "Sync scheme mismatch");
+            RejectJoin(from, KeyedReason("RejectSchemeMismatch"));
             return;
         }
 
@@ -1626,7 +1907,7 @@ public class NetManager
         try { handshakeVer = r.GetByte(); } catch { }
         if (handshakeVer != NetConfig.HandshakeVersion)
         {
-            RejectJoin(from, "Outdated mod version - please update");
+            RejectJoin(from, KeyedReason("RejectOutdated"));
             return;
         }
 
@@ -1645,20 +1926,55 @@ public class NetManager
         string roomHash = RoomPasswordHash();
         if (!string.IsNullOrEmpty(roomHash) && NetConfig.HashPassword(pwd) != roomHash)
         {
-            RejectJoin(from, "Wrong room password");
+            RejectJoin(from, KeyedReason("RejectWrongPassword"));
             return;
         }
 
+        // 局域网：客户端在密码后声明身份（SteamID 优先，否则 FakeID）→ 把传输 peerId 重绑到该身份。
+        // ⚠️ 重绑后 `from` 一律改用声明身份（名单键 / 踢人封禁 / 回包目标 / 中途加入快照）；
+        //    同一身份重复连接 → 拒绝（防冒用/防止同一身份双开同时进来）。
+        //    必须放在读名之前（封禁检查要用重绑后的身份）。
+        if (LanMode)
+        {
+            ulong declared = 0;
+            try { declared = r.GetULong(); } catch { }
+            if (declared != 0)
+            {
+                // ⚠️ 身份冲突：①与主机自己的身份相同（**同一台机器 + 同一 Steam 账号双开**必现）
+                //    ②名单里已被别的成员占用 → 派生一个局域网内唯一的 id（0xFACE 前缀，log/UI 显示 Fake#xxxx），
+                //    并通过 Welcome 回告给客机（客机采纳后 MarkLocal/名单都正确）。
+                ulong effective = declared;
+                bool conflict = effective == Local.SteamId;
+                if (!conflict)
+                    foreach (var s in Roster) if (s.SteamId == effective) { conflict = true; break; }
+                if (conflict)
+                {
+                    effective = DeriveUniqueLanId(declared);
+                    CoopRuntime.LogSource?.LogInfo($"[Net] LAN identity {declared} conflict → derived {effective} ({Core.Identity.Tag(effective)})");
+                }
+                if (effective != from)
+                {
+                    var lt = Transport as LanTransport;
+                    if (lt == null || !lt.RebindPeer(from, effective))
+                    {
+                        RejectJoin(from, KeyedReason("RejectDuplicateIdentity"));
+                        return;
+                    }
+                }
+                from = effective;
+            }
+            if (_banned.Contains(from)) { RejectJoin(from, KeyedReason("RejectBanned")); return; }
+        }
         var name = r.GetString();
 
         // 注册通道（前导字节 1）：读取并校验客户端注册表——客户端带主机不认识的通道 → 拒绝（build 不兼容）
-        try { if (!VerifyHostChannelTable(r)) { RejectJoin(from, "Registration mismatch"); return; } } catch { }
+        try { if (!VerifyHostChannelTable(r)) { RejectJoin(from, KeyedReason("RejectRegistrationMismatch")); return; } } catch { }
 
         PlayerSession session = null;
         foreach (var s in Roster) if (s.SteamId == from) { session = s; break; }
         if (session == null)
         {
-            int maxPlayers = LocalMode ? PendingMaxPlayers : Lobby.MaxPlayers;
+            int maxPlayers = NonSteam ? PendingMaxPlayers : Lobby.MaxPlayers;
             if (Roster.Count >= maxPlayers) return; // 已满
             session = new PlayerSession { SteamId = from, Name = name, PlayerId = NextFreeId() };
             Roster.Add(session);
@@ -1676,6 +1992,9 @@ public class NetManager
         w.Put(NetConfig.Version);
         w.Put(session.PlayerId);
         NetProtocol.WriteRoster(w, Roster);
+        // 局域网：回告本端在主机侧的身份（= 客户端声明值；极端回退时纠正）
+        // ⚠️ 必须放在注册表之前（WriteChannelTable 的结构必须在包尾）
+        if (LanMode) w.Put(from);
         // 注册通道（前导字节 2）：主机权威注册表随 Welcome 下发，客户端采纳
         WriteChannelTable(w);
         Transport.Send(from, NetProtocol.Snapshot(w), true);
@@ -1710,7 +2029,7 @@ public class NetManager
     /// <summary>当前房间密码 hash（Steam 模式读 LobbyData；本地模式用 PendingPassword）。空=无密码。</summary>
     private string RoomPasswordHash()
     {
-        if (LocalMode) return NetConfig.HashPassword(PendingPassword);
+        if (NonSteam) return NetConfig.HashPassword(PendingPassword);
         try { return Lobby.PasswordHash; } catch { return ""; }
     }
 
@@ -1722,8 +2041,8 @@ public class NetManager
         if (remoteScheme != localScheme)
         {
             CoopRuntime.LogSource?.LogWarning($"[Net] sync scheme mismatch: remote={remoteScheme} local={localScheme}, leave");
-            LastError = "Sync scheme mismatch";
-            Lobby.LeaveLobby();
+            LastError = Loc("RejectSchemeMismatch");
+            LeaveSession();
             return;
         }
         // 前导字节宽度沟通（注册通道）：主机声明的宽度必须与本端一致
@@ -1731,9 +2050,9 @@ public class NetManager
         try { remoteWidth = r.GetByte(); } catch { }
         if (remoteWidth != NetProtocol.HeaderWidth)
         {
-            LastError = $"Header width mismatch: host={remoteWidth} you={NetProtocol.HeaderWidth}";
+            LastError = Loc("ErrHeaderWidthMismatch", remoteWidth, NetProtocol.HeaderWidth);
             CoopRuntime.LogSource?.LogWarning($"[Net] header width mismatch host={remoteWidth} local={NetProtocol.HeaderWidth}, leave");
-            Lobby.LeaveLobby();
+            LeaveSession();
             return;
         }
         // 握手协议版本 + 主机模组版本核对：不符离开
@@ -1741,22 +2060,35 @@ public class NetManager
         try { handshakeVer = r.GetByte(); } catch { }
         if (handshakeVer != NetConfig.HandshakeVersion)
         {
-            LastError = "Outdated mod version - please update";
+            LastError = Loc("RejectOutdated");
             CoopRuntime.LogSource?.LogWarning("[Net] handshake version mismatch, leave");
-            Lobby.LeaveLobby();
+            LeaveSession();
             return;
         }
         string hostVer = "";
         try { hostVer = r.GetString(); } catch { }
         if (hostVer != NetConfig.Version)
         {
-            LastError = $"Mod version mismatch: host={hostVer} you={NetConfig.Version}";
+            LastError = Loc("ErrModVersionMismatch", hostVer, NetConfig.Version);
             CoopRuntime.LogSource?.LogWarning($"[Net] host version mismatch host={hostVer} local={NetConfig.Version}, leave");
-            Lobby.LeaveLobby();
+            LeaveSession();
             return;
         }
         var pid = r.GetByte();
         var roster = NetProtocol.ReadRoster(r);
+        // 局域网：读回主机认定的本端身份（放在注册表之前；必须在 MarkLocal 之前写入 Local.SteamId）
+        if (LanMode)
+        {
+            try
+            {
+                if (r.AvailableBytes >= 8)
+                {
+                    var mine = r.GetULong();
+                    if (mine != 0 && Local != null) Local.SteamId = mine;
+                }
+            }
+            catch { }
+        }
         Local.PlayerId = pid;
         Roster.Clear();
         Roster.AddRange(roster);

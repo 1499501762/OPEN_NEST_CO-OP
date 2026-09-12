@@ -51,6 +51,22 @@ public static class CoopConfig
     /// ⚠️ 默认关：2026-09-12 新增，未实测；开启需**双端**都设为 true。</summary>
     public static bool CalculateButtonSync => GetBool("Interactables", "CalculateButtonSync");
 
+    /// <summary>`[Identity] FakeId`（默认空 = 尚未生成）：**局域网联机时无 SteamID 可用则用这个身份**。
+    /// 首次读取时自动生成一个随机 ID 并**写回配置文件**（保证同一台机器身份稳定，重启/重连不变）。
+    /// 高 16 位固定为 `0xFACE` 标记 → 日志/名单里一眼区分“真实 SteamID” vs “FakeID”。</summary>
+    public static ulong FakeId => GetFakeId();
+
+    /// <summary>`[LAN] Port`（默认 29507）：局域网联机端口（主机 TCP 监听 / 客机默认连接 / UDP 发现）。</summary>
+    public static int LanPort => GetInt("LAN", "Port");
+
+    /// <summary>`[LAN] LastHost`（默认空）：上次加入的局域网地址（加入界面预填）。</summary>
+    public static string LanLastHost => GetString("LAN", "LastHost");
+
+    /// <summary>`[Identity] Name`（默认空）：本端显示名（名单/聊天）。
+    /// 留空 = Steam 昵称优先，无 Steam 则用 `Player<FakeID 后4位>`。局域网不用 Steam 时建议手填一个好认的名字。
+    /// ⚠️ 允许重名（名单不以名字去重，身份才是唯一键）。</summary>
+    public static string LocalName => GetString("Identity", "Name");
+
     // ==================================================================
     //  设置项登记表（默认值 / 段 / 键 / 说明；文件生成与解析都以此为准）
     // ==================================================================
@@ -88,6 +104,30 @@ public static class CoopConfig
                    "组件 = Transform / Animator / LookAtTarget / BoxCollider / AnimatorBoolToggler x4\n" +
                    "（与普通 Universal Button 同构 → 走 ButtonClickSync 点击复现 + 多 toggler 状态轮询）。\n" +
                    "false（默认）= 不同步；true = 同步。⚠️ 需双端一致（本开关不参与握手协商）。",
+        },
+        new Def
+        {
+            Section = "Identity", Key = "FakeId", Type = "string", Default = "",
+            Desc = "局域网联机身份（无 SteamID 时使用）。\n" +
+                   "留空（默认）= 首次使用自动生成一个随机 ID 并写回本文件（不要手改，改了会被对端当成新玩家）。\n" +
+                   "有 SteamID 时优先用 SteamID（见 docs/LAN.md）；本项只在 SteamID 不可用时生效。",
+        },
+        new Def
+        {
+            Section = "Identity", Key = "Name", Type = "string", Default = "",
+            Desc = "本端显示名（联机名单/聊天用）。留空 = Steam 昵称优先；无 Steam（局域网）则用 Player<FakeID 后4位>。\n" +
+                   "⚠️ 允许重名：名单不以名字去重，唯一身份是 SteamID / FakeID。",
+        },
+        new Def
+        {
+            Section = "LAN", Key = "Port", Type = "int", Default = "29507",
+            Desc = "局域网联机端口：主机 TCP 监听 + UDP 发现都用它；客机默认连这个端口。\n" +
+                   "两端可各自设不同值（客机在界面里直接填主机的端口即可）；若与其它软件冲突就换一个。",
+        },
+        new Def
+        {
+            Section = "LAN", Key = "LastHost", Type = "string", Default = "",
+            Desc = "上次加入的局域网主机地址（IP 或 主机名），仅用于界面预填；留空即可。",
         },
     };
 
@@ -213,6 +253,35 @@ public static class CoopConfig
     {
         var def = FindDef(section, key);
         return Unquote(GetRaw(section, key, def));
+    }
+
+    /// <summary>读取 FakeId；为空（首启）→ 生成随机 ID 并**立即写回配置文件**（持久化身份）。</summary>
+    private static ulong GetFakeId()
+    {
+        try
+        {
+            var def = FindDef("Identity", "FakeId");
+            var raw = Unquote(GetRaw("Identity", "FakeId", def));
+            if (ulong.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) && v != 0)
+                return v;
+            var gen = GenerateFakeId();
+            _values[Sig("Identity", "FakeId")] = gen.ToString(CultureInfo.InvariantCulture);
+            try { Save(); } catch { }
+            Log($"[CoopConfig] generated FakeId {gen} -> saved ({FilePath})");
+            return gen;
+        }
+        catch { return 0xFACE000000000001UL; }
+    }
+
+    /// <summary>生成 FakeID：高 16 位固定 `0xFACE`（区分真实 SteamID64，后者 &lt; 0x0110…）。
+    /// 其余 48 位随机 → 局域网内撞号概率可忽略（且主机侧会校验重复并回退）。</summary>
+    private static ulong GenerateFakeId()
+    {
+        var b = new byte[8];
+        try { System.Security.Cryptography.RandomNumberGenerator.Fill(b); }
+        catch { try { new System.Random().NextBytes(b); } catch { } }
+        ulong raw = BitConverter.ToUInt64(b, 0);
+        return 0xFACE000000000000UL | (raw & 0x0000FFFFFFFFFFFFUL);
     }
 
     private static string GetRaw(string section, string key, Def def)

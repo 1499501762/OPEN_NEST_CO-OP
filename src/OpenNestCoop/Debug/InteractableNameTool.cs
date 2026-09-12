@@ -56,11 +56,11 @@ public class InteractableNameTool : MonoBehaviour
                 CoopRuntime.LogSource?.LogInfo("[InteractableNameTool] running: crosshair shows interactable names");
             }
             var cam = Camera.main;
-            if (cam == null) { _text = "(无相机)"; return; }
+            if (cam == null) { _text = Loc("ToolNoCamera"); return; }
             var ray = cam.ScreenPointToRay(new Vector3(Screen.width * 0.5f, Screen.height * 0.5f, 0f));
-            if (!Physics.Raycast(ray, out var hit, 8f)) { _text = "(未命中)"; return; }
+            if (!Physics.Raycast(ray, out var hit, 8f)) { _text = Loc("ToolNoHit"); return; }
             var go = hit.collider != null ? hit.collider.gameObject : null;
-            if (go == null) { _text = "(无碰撞体)"; return; }
+            if (go == null) { _text = Loc("ToolNoCollider"); return; }
 
             // 沿父链找交互组件：LookAtTarget（按钮/拉杆）/ Interactable（点击底层）/ Dial/Slider
             GameObject target = go;
@@ -81,13 +81,16 @@ public class InteractableNameTool : MonoBehaviour
                     }
                 }
             }
-            _text = $"[F9 循环] 交互工具 (4/4)  [F10复制]\n交互名='{target.name}'\n路径: {PathOf(target.transform)}\n组件: {ComponentsOf(target)}\n命中: {go.name}" + SyncStatus(lat);
+            _text = Loc("ToolHeader") + $"\n{Loc("ToolName")}='{target.name}'\n{Loc("ToolPath")}: {PathOf(target.transform)}\n{Loc("ToolComponents")}: {ComponentsOf(target)}\n{Loc("ToolHit")}: {go.name}" + SyncStatus(lat);
         }
         catch (System.Exception ex)
         {
-            _text = "工具异常: " + ex.Message;
+            _text = OpenNestCoop.Core.Loc.LocFile.Get("ToolError", ex.Message);
         }
     }
+
+    /// <summary>语言键取文案（F10 工具文案已全部上语言文件）。</summary>
+    private static string Loc(string key) => OpenNestCoop.Core.Loc.LocFile.Get(key);
 
     /// <summary>附一行“同步状态”（帮助判断这个交互实体到底有没有被同步：
     /// 点击复现（ButtonClickSync）是否跟踪——**已含配置开关判定**，如 Calculate Universal Button 默认关）。</summary>
@@ -95,11 +98,11 @@ public class InteractableNameTool : MonoBehaviour
     {
         try
         {
-            if (lat == null) return "\n同步(点击复现): 不适用(非 LookAtTarget 按钮)";
+            if (lat == null) return "\n" + Loc("ToolSyncNA");
             bool tracked = OpenNestCoop.GameSync.ButtonClickSync.IsTracked(lat);
-            return "\n同步(点击复现): " + (tracked ? "开" : "关") + "  [CoopConfig " + OpenNestCoop.Core.CoopConfig.Summary() + "]";
+            return "\n" + Loc(tracked ? "ToolSyncOn" : "ToolSyncOff") + "  [CoopConfig " + OpenNestCoop.Core.CoopConfig.Summary() + "]";
         }
-        catch (System.Exception ex) { return "\n同步(点击复现): ? (" + ex.Message + ")"; }
+        catch (System.Exception ex) { return "\n" + OpenNestCoop.Core.Loc.LocFile.Get("ToolSyncUnknown") + " (" + ex.Message + ")"; }
     }
 
     private void OnGUI()

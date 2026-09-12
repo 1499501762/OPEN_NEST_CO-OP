@@ -36,6 +36,12 @@ public static class AutoJoin
     public static bool WantLocalHost;
     /// <summary>本地模式：client。</summary>
     public static bool WantLocalJoin;
+    /// <summary>局域网模式：host（--lan host）。</summary>
+    public static bool WantLanHost;
+    /// <summary>局域网模式：client（--lan join）。</summary>
+    public static bool WantLanJoin;
+    /// <summary>局域网目标主机 IP/机器名（--lanip，默认 127.0.0.1）。</summary>
+    public static string LanIp = "127.0.0.1";
     /// <summary>本地模式端口。</summary>
     public static int LocalPort = NetConfig.LocalDefaultPort;
     /// <summary>网络延迟模拟：基础单向延迟 ms（--lag）。</summary>
@@ -54,6 +60,8 @@ public static class AutoJoin
     public static bool WantNewSync;
 
     private static bool _hostTriggered;
+    /// <summary>局域网客机重试节流（失败后下次尝试的最早时间；防每帧阻塞主线程等连接超时）。</summary>
+    private static float _lanRetryAt;
 
     // 中途加入时暂停游戏（防加入过程中场景/操作干扰）；成功/失败后恢复。
     private static bool _pausedForJoin;
@@ -79,6 +87,17 @@ public static class AutoJoin
                     string v = (args[++i] ?? "").Trim();
                     if (v.Equals("host", StringComparison.OrdinalIgnoreCase)) WantLocalHost = true;
                     else if (v.Equals("join", StringComparison.OrdinalIgnoreCase)) WantLocalJoin = true;
+                }
+                else if (a.Equals("--lan", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    // 局域网模式（TCP 直连，不经 Steam 大厅）：host / join
+                    string v = (args[++i] ?? "").Trim();
+                    if (v.Equals("host", StringComparison.OrdinalIgnoreCase)) WantLanHost = true;
+                    else if (v.Equals("join", StringComparison.OrdinalIgnoreCase)) WantLanJoin = true;
+                }
+                else if (a.Equals("--lanip", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    LanIp = (args[++i] ?? "").Trim();
                 }
                 else if (a.Equals("--localport", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 {
@@ -124,9 +143,9 @@ public static class AutoJoin
             }
             if (LobbyFile.Length == 0)
                 LobbyFile = Path.Combine(Path.GetTempPath(), "open_nest_lobby.txt");
-            bool any = WantHost || WantJoin || WantLocalHost || WantLocalJoin;
+            bool any = WantHost || WantJoin || WantLocalHost || WantLocalJoin || WantLanHost || WantLanJoin;
             if (any || LagMs > 0 || JitterMs > 0)
-                CoopRuntime.LogSource?.LogInfo($"[AutoJoin] args: host={WantHost} join={WantJoin} localHost={WantLocalHost} localJoin={WantLocalJoin} port={LocalPort} lag={LagMs} jitter={JitterMs}");
+                CoopRuntime.LogSource?.LogInfo($"[AutoJoin] args: host={WantHost} join={WantJoin} localHost={WantLocalHost} localJoin={WantLocalJoin} lanHost={WantLanHost} lanJoin={WantLanJoin} lanIp={LanIp} port={LocalPort} lag={LagMs} jitter={JitterMs}");
             NetLagSim.Configure(LagMs, JitterMs, CapKBps, PacketCap, LossPercent);
         }
         catch (Exception ex)
@@ -153,8 +172,37 @@ public static class AutoJoin
     public static void TryStart(NetManager net)
     {
         if (_handled || net == null) return;
-        if (!WantHost && !WantJoin && !WantLocalHost && !WantLocalJoin) return;
+        if (!WantHost && !WantJoin && !WantLocalHost && !WantLocalJoin && !WantLanHost && !WantLanJoin) return;
         if (net.State != SessionState.Idle) return;
+
+        // 局域网模式（--lan host / --lan join + --lanip）：TCP 直连，不经 Steam 大厅
+        if (WantLanHost || WantLanJoin)
+        {
+            net.LanJoinPort = LocalPort;
+            if (WantLanHost)
+            {
+                _handled = true;
+                _hostTriggered = true;
+                net.CreateLanRoom();
+                CoopRuntime.LogSource?.LogInfo($"[AutoJoin] LAN host (port {LocalPort})");
+            }
+            else
+            {
+                // 客机：主机可能未就绪 → 失败保留 handled=false，下一帧重试
+                // ⚠️ 但**必须节流**：Connect 会阻塞等待（超时 1.5s），每帧重试 = 主线程每次卡 1.5s。
+                if (UnityEngine.Time.realtimeSinceStartup < _lanRetryAt) return;
+                _lanRetryAt = UnityEngine.Time.realtimeSinceStartup + 3f;
+                net.LanJoinHost = LanIp;
+                if (!_pausedForJoin) { PauseForJoin(); _pausedForJoin = true; }
+                if (net.JoinLanRoom())
+                {
+                    _handled = true;
+                    CoopRuntime.LogSource?.LogInfo($"[AutoJoin] LAN client connected to {LanIp}:{LocalPort}");
+                }
+                else CoopRuntime.LogSource?.LogInfo($"[AutoJoin] LAN connect failed ({net.LastError}), retrying...");
+            }
+            return;
+        }
 
         // 本地回环模式：不经 Steam，直接建房/加入
         if (WantLocalHost || WantLocalJoin)

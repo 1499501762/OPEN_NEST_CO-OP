@@ -16,6 +16,11 @@
 > V1 已符合（PlayerSync 位置/ValueSync 高频 unreliable + 2s reliable 心跳）；V2 修正（`ValueLayer` 心跳/低频改 reliable、
 > `PlayerSyncV2` 加 2s reliable 心跳）。
 >
+> **2026-09-12 通道原则（补，用户要求）**：**低频变更属性（铁巢位置/炮弹起点图标等静态摆放）→ 变化检测 + 缓存，变了才发**，
+> 不用心跳重发（心跳只当“检测器”，无变化时零包）。代价：丢掉这一发就永久不同步 → 必须配套
+> ① `NetManager.RegisterCriticalType` 或 `High/Critical` 优先级（合包满不丢）；② `OnLateJoin` 给中途加入补发一次。
+> 参考实现：`GameSync/NestSync.cs`（`HostHasChanged` / `ClientEnsureIcon`）。
+>
 > **2026-09-12 修订**：新增 `ShotSync`（动态通道 `shotparams`，V1）——炮弹**发射参数**主机权威下发
 > （起点/终点/飞行时长/路径长），客机套用到本地同发炮弹，修“两端落点不一致”的**根因**
 > （原先假设“两端开火参数相同→本地模拟一致”已证伪）；详见 `docs/IMPACT_ASSESSMENT.md`。
@@ -33,6 +38,15 @@
 > ②**关键包保护表新增公开注册函数** `NetManager.RegisterCriticalType/RegisterCriticalTypes/IsCriticalRegistered`
 > （第三方模块/非 Critical 优先级模块可显式登记；见 `docs/API.md` §3.1）；
 > ③**新交互同步**：`Artillery Computer Console/Calculate Universal Button` 纳入 `ButtonClickSync`（配置开关，默认关）。
+>
+> **2026-09-12 修订（五）**：**新增局域网联机**（不经 Steam 大厅的 TCP 直连，见 `docs/LAN.md`）：
+> ①`Net/LanTransport.cs`（多客户端 TCP、peerId 分配 + 身份重绑、断线事件）、`Net/LanDiscovery.cs`（UDP `ONCQ`/`ONCR` 广播发现）；
+> ②`Core/Identity.cs`——身份规则“**SteamID 优先，否则用配置里的 FakeID（自动生成并落盘）**”，FakeID 高 16 位固定 `0xFACE`；
+> ③`NetManager` 用 `NonSteam`（`LocalMode || LanMode`）收敛“非 Steam 传输”分支，新增 `CreateLanRoom/JoinLanRoom/ScanLan/LanRooms`；
+> Hello 携带身份声明 / Welcome 回告身份（仅该模式，Steam 协议不变）；④菜单新增**独立选项卡**（`CoopUIManager.BuildIdleTabs/BuildLan`）。
+>
+> **2026-09-12 修订（四）**：`NestSync`（146）铁巢/炮弹起点图标同步由「1.5s 心跳重发」改为
+> **「变化检测 + 缓存，变了才发」**（`HostHasChanged` / `ClientEnsureIcon`）；146 登记为关键包，新增 `OnLateJoin` 补发。
 
 ---
 
@@ -299,8 +313,10 @@ currentSelectedCharges）+ **开局误激活修复**（移除 Tick 补激活链�
 | `Net/NetManager.cs` | 会话状态机、收发泵、批量合包（含关键包保护表 `RegisterCriticalType`）|
 | `Net/NetworkGovernor.cs` | 网络负载分级调控器（NetQualityTier × 频率/合包/拆包动态控制，见 `docs/NETWORK_GOVERNOR.md`）|
 | `Net/NetProtocol.cs` | 消息协议、序列化、Roster |
-| `Net/ITransport.cs` | 传输抽象 |
+| `Net/ITransport.cs` | 传输抽象（peerId=ulong：Steam=SteamID；非 Steam=主机 1 + 连接序号/声明身份） |
 | `Net/SteamTransport.cs` | Steamworks P2P 实现 |
+| `Net/LanTransport.cs` | **局域网 TCP 实现**（多客户端/身份重绑/断线事件，见 `docs/LAN.md`） |
+| `Net/LanDiscovery.cs` | **局域网 UDP 广播发现**（`ONCQ`/`ONCR`） |
 | `Net/LocalTransport.cs` | TCP 回环双开实现 |
 | `Net/PlayerSession.cs` | 玩家模型 |
 | `Net/SteamLobby.cs` | 大厅发现/会话 |

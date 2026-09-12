@@ -49,6 +49,11 @@ public static class CoopRuntime
         // ⚠️ 必须在模块注册/首次 Tick 前加载——各同步模块在 Tick/OnPacket 里读 CoopConfig 决定是否同步。
         CoopConfig.Init();
 
+        // 语言键文件（OpenNestCoop.lang.ini，与配置同目录；界面文案的来源，见 docs/LOCALIZATION.md）
+        // 必须在 Init 之后（路径与配置同目录）、并在任何读文案的代码之前（CoopLoc.Refresh 把游戏语言告诉它）。
+        OpenNestCoop.Core.Loc.LocFile.Init();
+        UI.CoopLoc.Refresh();
+
         // 独立文件日志：诊断/联机日志 → frame/net/sync 独立 .log（主日志安静 → 控制台不刷屏 → 帧性能提升）
         InitFileLogs();
 
@@ -124,6 +129,8 @@ public static class CoopRuntime
         CoopLog.RouteToFile("shot.", "sync");   // 炮弹发射参数（ShotSync）+ 发射参数诊断（[ShotDiag]）
         CoopLog.RouteToFile("blocker.", "sync"); // 锁止组件（BlockerSync）
         CoopLog.RouteToFile("BlockerSync", "sync");
+        // ⚠️ 2026-09-12：铁巢/炮弹起点图标（NestSync）——变化检测日志 + [NestSync] 直调
+        CoopLog.RouteToFile("nest.", "sync");
         // ⚠️ 2026-08-30：自定义任务诊断 → 独立 mission.log（OncMissionBridge 全部 onc.mission.* + 节点诊断 UI mission.diag）
         CoopLog.RouteToFile("onc.mission.", "mission");
         CoopLog.RouteToFile("mission.diag", "mission");
@@ -151,7 +158,7 @@ public static class CoopRuntime
             "RecordPlayerSync","StateSnapshot","ButtonClickSync",
             // ⚠️ 直调消息前缀补充（模块 key 可能是 XxxSync，但 LogSource 直调用 [Xxx] 短名）
             "ImpactSync","Impact","MissionEvent","Mission","Purchase","PurchaseV2","Notification",
-            "ShotSync","ShotDiag",
+            "ShotSync","ShotDiag","NestSync",
             "MapSync","M3Env","M3EnvV2","TurretSync","PlayerSync","PlayerSyncV2","XSync",
             "CatSyncV2","CoffeeSyncV2","MissionSyncV2","PunchcardSyncV2","RecordItemSyncV2",
             "ReloadSyncV2","RecordPlayerSyncV2","MapMarkerSyncV2","HatchSyncV2","GunLinkSyncV2",

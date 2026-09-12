@@ -10,7 +10,7 @@
 param(
     [string]$GameDirG,
     [string]$GameDirD,
-    [string]$Version = "0.2.1-Alpha-1",
+    [string]$Version = "0.2.1-Alpha-2",
     # 全新加载器源（Standalone 用，不用本地 G/D 环境；MLL 与 BepInEx 完全分开打包）
     # ⚠️ BepInEx 必须用 6.0.0-be.785（Bleeding Edge build 785，builds.bepinex.dev/projects/bepinex_be/785）
     [string]$BepInEx6Zip = "",

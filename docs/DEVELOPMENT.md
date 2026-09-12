@@ -6,6 +6,9 @@
 
 ## 更新记录
 
+- 2026-09-12：新增**独立模组 `OpenNestModMenu`**（模组菜单：列表 / 启停 / 统一设置中心 / 统一加载顺序 / 调试面板）——
+  工程 `src\OpenNestModMenu`（BepInEx 壳）+ `src\OpenNestModMenu.MelonMod`（ML 壳）+ `src\OpenNestModMenu.API`（第三方契约程序集，纯 .NET）；
+  **不依赖 OpenNestCore / OpenNestCoop**（UI/日志基建以「拷入 `Vendor/` + 改独立命名空间」方式复用）。`deploy.ps1` 已接入双端部署。设计与标准见 `docs/MOD_MENU.md`。
 - 2026-08-25：`deploy.ps1` 改为**默认双端部署**（BepInEx 版 → G 盘 `BepInEx\plugins\`；MelonLoader 版 → D 盘 `Mods\`+`UserLibs\`），`-BepOnly`/`-MllOnly` 只部署一端；修复 `HarmonyPatches.cs` MLL 端缺 `using Localisation = Il2CppLocalisation;`。
 - 2026-08-25 **帧/网络性能优化（日志降级）**：用户反馈帧性能差 + 网络轻微问题。排查日志发现大量**高频诊断日志**用 `CoopRuntime.LogSource?.LogInfo` 直调（不走 CoopLog，无等级过滤/节流，Release 默认 Info 下每次执行字符串格式化+写盘 → 日志 I/O 卡帧；网络 RTT 400-500ms 与帧率低同源——Update 变慢拖长 Ping/Pong 往返）。**修复**：批量把 30+ 处高频诊断日志（`[Net] recv batch`/`[Net] flush`/`[ControlSync] dial-diag/charge-dial/registered/reg`/`[ValueSync] diag`/`[CatSync] host AI state`/`[GunLinkSync] scan`/`[RecordItemSync]/[PunchcardSync] host send`/`[ChargeButtonSync]/[ChargeInventorySync] broadcast`/`[Requisition] powder/points`/`[Teleprinter]` 全套/`[MapMarker] erase` 及 V2 对应）从 `LogInfo` 转 `CoopLog.Debug(key, Func, interval)`——**默认关闭（Release=Info），Func 惰性求值零开销**，需要时命令行开 Debug 级。保留 Info 的关键联机摘要：`MissionSync/MissionSyncV2 host broadcast`（2s 保活）、`NetGovernor UP/DOWN`（1s 分级评估）、`[Net] stats 10s`、会话事件。教训：**诊断日志一律走 CoopLog.Debug（默认关），不得用 LogInfo 直调高频路径**；`CoopLog` 已全局 using（`global using OpenNestCore.Logging`）。
 - 2026-08-25 **独立日志系统（ModLog + 路由）**：新增 `OpenNestCore/Logging/ModLog.cs`——**独立文件日志**（StringBuilder 缓冲 + 1s 间隔批量落盘，性能好，不附加主日志/控制台）。`CoopLog.RouteToFile(keyPrefix, file)` 按 key 前缀路由：诊断/联机日志写到 `游戏目录/OpenNestLogs/*.log`（frame.log/net.log/sync.log），**主日志只留会话/错误 → 控制台不刷屏 → 帧性能提升**。`CoopRuntime.InitFileLogs` 注册路由（frame/net./Net./各联机模块前缀→sync）；`CoopBehaviour.Update` 每帧 `ModLog.Flush`。
@@ -56,6 +59,9 @@ src/OpenNestCoop/            BepInEx 插件（壳）+ 平台无关核心源码
   Debug/                     InteractableNameTool（F9 交互名调试）
 src/OpenNestCoop.MelonMod/   MelonLoader 版壳（#if MELONLOADER 编译）
 src/OpenNestCore/            平台无关核心库（Avatar/IPlayerVisualProvider、AvatarPose、CrewRole、Logging/CoopLog 等）
+src/OpenNestModMenu/        模组菜单模组（**独立**；BepInEx 壳 + Core/ + Vendor/ 自带源码副本，见 docs/MOD_MENU.md）
+src/OpenNestModMenu.API/    模组菜单第三方契约程序集（纯 .NET，无 Unity/游戏依赖，双端同一份）
+src/OpenNestModMenu.MelonMod/ 模组菜单 MelonLoader 版壳（链接 ../OpenNestModMenu 源码，排除 Plugin.cs）
 tools/AsmDump/               程序集侦察工具（游戏类型 / Steam API 结构）
 scripts/                     package.ps1（打包 4 包）、dualtest.ps1（双端测试）、deploy.ps1（单机 BepInEx 部署）、env.ps1、env.example.ps1
 docs/                        API.md（扩展 API 文档）、本文件、SYNC_V2_DEV.md 等
@@ -112,6 +118,8 @@ dotnet build -c Release -p:DeployToGame=true
   - **BepInEx 版**（`src\OpenNestCoop`）→ G 盘 `$GamePluginsDir`（`游戏目录\BepInEx\plugins\`）；
   - **MelonLoader 版**（`src\OpenNestCoop.MelonMod`）→ D 盘 `$ClientGame`：`Mods\OpenNestCoop.MelonMod.dll` + `UserLibs\LiteNetLib.dll / SharpGLTF.Core.dll / SharpGLTF.Runtime.dll`；
   - 两端都同步 `model\player.bundle` 到游戏 `Models\`；`-BepOnly`/`-MllOnly` 只部署一端。
+  - **OpenNestModMenu 也随 `deploy.ps1` 双端部署**：BepInEx 版 → `BepInEx\plugins\OpenNestModMenu.dll` + `OpenNestModMenu.API.dll`；
+    MLL 版 → `Mods\OpenNestModMenu.MelonMod.dll` + `UserLibs\OpenNestModMenu.API.dll`（由各自 csproj 的 `DeployToGame`/`DeployToMods` 目标完成）。
 - `package.ps1`：双平台构建（`src\OpenNestCoop` + `src\OpenNestCoop.MelonMod`）→ staging → 4 个 zip；版本号默认 0.1.9（`-Version` 可覆盖，注意与 5 处版本号同步）。
 - ⚠️ MLL 版构建依赖 G 端 `MLLoader`（MelonMod.csproj 的 `MLBase`/`MLCore` 引用 interop）；覆盖 DLL 时需先关闭游戏，否则文件被占用。
 - ⚠️ 双平台 `#if MELONLOADER` 坑：MLL 端需 `using Localisation = Il2CppLocalisation;` / `using SleepyNodes = Il2CppSleepyNodes;` 等 interop 别名（`HarmonyPatches.cs` 曾漏 → CS0246）。
@@ -125,12 +133,17 @@ dotnet build -c Release -p:DeployToGame=true
 ```powershell
 # 本地回环双开（同一台机器两个游戏安装，不经 Steam；默认模拟 170ms 延迟 + 50ms 抖动）
 .\scripts\dualtest.ps1 -Local
+# 局域网模式双开（生产同一条代码路径：--lan host / --lan join；主机绑 0.0.0.0）
+.\scripts\dualtest.ps1 -Lan                  # 客机连 127.0.0.1:29507（走 0.0.0.0 监听）
+.\scripts\dualtest.ps1 -Lan -LanIp 192.168.1.5   # 跨机：只启客机时加 -ClientOnly
 # 关闭延迟模拟：加 -Lag 0；覆盖延迟/抖动：-Lag 100 -LagJitter 30
 # 只起一端：-HostOnly / -ClientOnly；指定同步方案：-Sync new（两端都传 --sync new）
 ```
 
 - 主机 G 端日志 `BepInEx\LogOutput.log`、客机 D 端日志 `MelonLoader\Latest.log`（直接读这两个，勿依赖 runlog 拷贝）。
 - 本地回环模式下 Steam P2P 被绕过（TCP loopback），可单 Steam 会话双开。
+- **局域网模式**（`-Lan`）：主机监听 `0.0.0.0:<端口>`（真实局域网可连），客机 TCP 直连；同 Steam 账号双开时主机自动派生
+  唯一身份（`Fake#xxxx`）→ 可正常双开测试；详见 `docs/LAN.md`。首次运行 Windows 防火墙可能弹窗，需允许（专用网络）。
 
 ### Steam 双账号测试（跨机 / 跨账号）
 

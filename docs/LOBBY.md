@@ -26,6 +26,9 @@
 
 ## 一、功能总览
 
+> ℹ️ **另见 `docs/LAN.md`（局域网联机，2026-09-12 新增）**：不经 Steam 大厅的 TCP 直连 + UDP 广播发现，
+> 身份规则“SteamID 优先，否则配置里的 FakeID”，菜单里是独立选项卡。本文档只讲 **Steam 大厅**这条路径。
+
 | 能力 | 说明 | 实现位置 |
 |---|---|---|
 | **房间密码** | 创建房间可选密码；列表显示 🔒；加入有密码房间需输入；主机握手权威校验（错误 → Kick + 原因） | `SteamLobby` / `NetManager.OnHello` / 两套 UI |
@@ -37,7 +40,7 @@
 | **房间密码状态显示** | 房间内显示"房间密码: 🔒有/无"（主机看 PendingPassword、成员看 LobbyData）；大厅列表已有 🔒 | UI |
 | **版本号核对** | 握手 Hello/Welcome 带版本号，两端不一致 → 拒绝/离开并提示 | `NetManager.OnHello` / `OnWelcome` |
 | **旧客户端拒绝** | Hello 握手协议号（`HandshakeVersion=2`）不匹配 → 拒绝（旧版无此字段） | `NetManager.OnHello` |
-| **拒绝原因** | Kick 消息带原因字符串，被拒端显示具体原因（版本不符/密码错误/已封禁等） | `KickPlayer` / `OnKicked` |
+| **拒绝原因** | Kick 消息带原因字符串，被拒端显示具体原因（版本不符/密码错误/已封禁等）。⚠️ 2026-09-12 起原因以**语言键**下发（`@Key` / `@Key|arg1|arg2`），由**接收端按本端语言**显示；见 `docs/LOCALIZATION.md` §4 | `KickPlayer` / `OnKicked` |
 
 ---
 
