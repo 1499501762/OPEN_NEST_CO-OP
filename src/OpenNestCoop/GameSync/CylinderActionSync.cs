@@ -21,7 +21,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class CylinderActionSync : ISyncedModule
 {
-    public byte MsgType => 141;
+    public int MsgType => 141;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new CylinderActionSync());
     public const byte MsgTypeId = 141;
 
     private const byte EvLoadShell = 1;   // OnLoadButtonClicked：推弹头

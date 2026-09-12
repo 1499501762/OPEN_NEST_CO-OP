@@ -34,9 +34,16 @@ public static class HarmonyPatches
         // 谁操作谁权威：任何端都可本地操作炮塔输入，不再拦截（方向角/仰角由 Lever/Gear 值同步 + DesiredRotation 状态同步）
         // TryPatch(typeof(TurretController), "HandleInput", prefix: nameof(PreHandleInput));
         TryPatch(typeof(GunController), "FireShell", postfix: nameof(PostFireShell));
-        TryPatch(typeof(GunController), "RequestFire", prefix: nameof(PreRequestFire));
+        TryPatch(typeof(GunController), "RequestFire", prefix: nameof(PreRequestFire), postfix: nameof(PostRequestFire));
         TryPatch(typeof(CounterBatteryCinematicImpactSpawner), "SpawnOne", prefix: nameof(PreSpawnOne));
-        TryPatch(typeof(MapReconClearHandle), "RegisterChild", prefix: nameof(PreRegisterChild));
+        TryPatch(typeof(MapReconClearHandle), "RegisterChild", prefix: nameof(PreRegisterChild), postfix: nameof(PostRegisterChild));
+        // ⚠️ 2026-09-12 照片角度：**同步随机种子**（用户建议方向）。
+        // 照片角度 = 游戏 `RandomUIRotation.Awake` 里用 `UnityEngine.Random` 在 [min,max] 之间 roll
+        // （实测 min=5 max=85 axis=Z；`[RurSeed] match=YES` 验证游戏确实用全局 `UnityEngine.Random`）。
+        // 全局随机可播种 → 两端在 Awake 前用**同一个种子**（由两端一致的权威落点派生）InitState，
+        // 游戏自己 roll 出的角度就相同：**不传角度、不事后覆盖、无 1 帧闪烁**；事后恢复全局随机状态。
+        // ⚠️ 2026-09-12 停用：`RandomUIRotation.Awake` 的“同步随机种子”方案实测未生效（双端 [RurSeed] 零日志），
+        // 照片角度继续走 ImpactSync 广播游戏真实角度（tilt）那条已存在的路径。
         // ⚠️ 2026-08-23 着弹/炮弹诊断：用户反馈"只打两发但着弹多触发/侦察照片多触发"。
         // 计数定位：每发炮弹创建几个 ShellVisual（Initialize）、着弹评估/特效各触发几次
         // （ImpactTracker.EvaluateImpact static / ShellVisual.SpawnImpactEffectAt）→ 判断是炮弹重复创建还是着弹重复触发。
@@ -75,17 +82,33 @@ public static class HarmonyPatches
         // ⚠️ 2026-08-26：铁巢（TurretController）位置同步——patch MoveTurret/SetTurretLocation（对齐
         // Synchrony NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
         // 主机权威：主机移动铁巢 postfix 广播，客机拦截本地移动（prefix）+ 接收广播应用（防环）。
-        TryPatch(typeof(TurretController), "MoveTurret",
-            prefix: nameof(NestSync.PreTurretMove), postfix: nameof(NestSync.PostTurretMove));
-        TryPatch(typeof(TurretController), "SetTurretLocation",
-            prefix: nameof(NestSync.PreTurretMove), postfix: nameof(NestSync.PostTurretSetLocation));
+        // ⚠️ 必须显式指定参数类型（Vector3）：AccessTools.Method 无参数类型在 IL2CPP 下找不到
+        // MoveTurret/SetTurretLocation（有 Vector3 参数）→ patch 失败 → 铁巢位置同步不生效。
+        {
+            var ttType = typeof(TurretController);
+            var miMove = AccessTools.Method(ttType, "MoveTurret", new[] { typeof(Vector3) });
+            var miSet = AccessTools.Method(ttType, "SetTurretLocation", new[] { typeof(Vector3) });
+            if (miMove != null) TryPatchMethod(ttType, "MoveTurret", miMove,
+                prefix: nameof(NestSync.PreTurretMove), postfix: nameof(NestSync.PostTurretMove));
+            else CoopRuntime.LogSource?.LogWarning("Harmony: TurretController.MoveTurret not found (Vector3)");
+            if (miSet != null) TryPatchMethod(ttType, "SetTurretLocation", miSet,
+                prefix: nameof(NestSync.PreTurretMove), postfix: nameof(NestSync.PostTurretSetLocation));
+            else CoopRuntime.LogSource?.LogWarning("Harmony: TurretController.SetTurretLocation not found (Vector3)");
+        }
+        // 仰角联动（GunElevationLinkCoordinator.SetLinked/ToggleLinked）——事件驱动（2026-08-31）：
+        // 玩家切换联动 → postfix 广播 isLinked（GunLinkSync 去重），去掉 0.3s 轮询扫描。
+        TryPatch(typeof(GunElevationLinkCoordinator), "SetLinked", postfix: nameof(PostGunLinkSet));
+        TryPatch(typeof(GunElevationLinkCoordinator), "ToggleLinked", postfix: nameof(PostGunLinkToggle));
         // 预备激发火炮（ArmedFireRelayOneShot.ArmLeft/ArmRight/DisarmLeft/DisarmRight）——事件解耦（P0）：
         // 直接广播业务方法调用，对端调同名方法（不依赖按钮 active，修"客机拉 Arm 没用" inactive 排队丢弃）。
         // prefix：先广播再放行原方法（本地正常执行 + 对端复现），IsApplyingArm 防环。
-        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "ArmLeft", prefix: nameof(PreArmLeft));
-        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "ArmRight", prefix: nameof(PreArmRight));
-        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "DisarmLeft", prefix: nameof(PreDisarmLeft));
-        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "DisarmRight", prefix: nameof(PreDisarmRight));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "ArmLeft", postfix: nameof(PostArmLeft));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "ArmRight", postfix: nameof(PostArmRight));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "DisarmLeft", postfix: nameof(PostDisarmLeft));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "DisarmRight", postfix: nameof(PostDisarmRight));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "ToggleLeft", postfix: nameof(PostToggleLeft));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "ToggleRight", postfix: nameof(PostToggleRight));
+        TryPatch(typeof(Zagreekie.Tools.ArmedFireRelayOneShot), "TriggerFire", postfix: nameof(PostTriggerFire));
         // 弹舱动作（CylinderShellSelector.OnLoadButtonClicked 推弹头 / OnMoveButtonClicked 切弹舱）——事件解耦（P1）：
         // 直接广播业务方法调用，对端调同名方法（不依赖按钮 active，修装填区按钮 inactive 排队问题）。
         TryPatch(typeof(CylinderShellSelector), "OnLoadButtonClicked", prefix: nameof(PreCylLoadShell));
@@ -108,6 +131,22 @@ public static class HarmonyPatches
         // 任务随机内容一致：FireMission.GenerateMission 生成目标前应用主机 seed
         // （客机收到主机 seed 后，无论何时 GenerateMission 都先设置 useFixedSeed/fixedSeed → 两端随机一致）
         TryPatch(typeof(FireMission), "GenerateMission", prefix: nameof(PreFireMissionGenerate));
+        // ⚠️ 2026-08-31：列车/移动目标（FireMission.MoveMapEntity 连续移动，startedAt/endsAt 时间戳插值）——
+        // 两端任务图各自触发 MoveMapEntity 且时间戳基准不同 → 两端列车插值相位不同 → 位置漂移（“列车不同步”）。
+        // ⚠️ 两个重载（4参/6参）都 patch；显式参数类型（MapEntity + Vector3）避免 AccessTools 无参类型找不到。
+        {
+            var fmType = typeof(FireMission);
+            var miMove4 = AccessTools.Method(fmType, "MoveMapEntity", new[] { typeof(MapEntity), typeof(Vector3), typeof(bool), typeof(float) });
+            var miMove6 = AccessTools.Method(fmType, "MoveMapEntity", new[] { typeof(MapEntity), typeof(Vector3), typeof(bool), typeof(float), typeof(double), typeof(double) });
+            var preMove = new HarmonyMethod(AccessTools.Method(typeof(HarmonyPatches), nameof(PreMoveMapEntity)));
+            if (miMove4 != null) _harmony.Patch(miMove4, prefix: preMove);
+            else CoopRuntime.LogSource?.LogWarning("Harmony: FireMission.MoveMapEntity (4-arg) not found");
+            if (miMove6 != null) _harmony.Patch(miMove6, prefix: preMove);
+            else CoopRuntime.LogSource?.LogWarning("Harmony: FireMission.MoveMapEntity (6-arg) not found");
+        }
+        // ⚠️ 2026-09-05 撤销 State_MoveMapEntity.OnEnter patch（任务图同步实验）：该 patch 客机 return false 拦截本地
+        // OnEnter，但主机 Resolve 广播链路在 killwave 场景未触发/失败 → 客机列车移动被拦截且无广播驱动 → "客机列车
+        // 压根不动"。列车位置同步回到 HEAD 方案（EntitySync 主机权威位置广播 + 客机插值跟随）。
         // 任务打字机通知同步：UINotificationManager.ShowNotification 事件 → 主机广播 → 客机复现
         TryPatch(typeof(UINotificationManager), "ShowNotification", postfix: nameof(PostShowNotification));
         // 主菜单联机入口（2026-08-23）：原生主菜单加载完成（MainMenuStateRelay.HandleMainMenuLoaded，private）→
@@ -205,6 +244,28 @@ public static class HarmonyPatches
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony: {target.Name}.{method} patch failed: {ex.Message}"); }
     }
 
+    /// <summary>用显式 MethodInfo patch（IL2CPP 下 AccessTools.Method 无参数类型找不到方法时，
+    /// 如 MoveTurret/SetTurretLocation 带 Vector3 参数）。prefix/postfix 在 NestSync 内。</summary>
+    private static void TryPatchMethod(Type target, string method, System.Reflection.MethodInfo mi,
+        string prefix = null, string postfix = null)
+    {
+        try
+        {
+            if (mi == null)
+            {
+                CoopRuntime.LogSource?.LogWarning($"Harmony: cannot find {target.Name}.{method}");
+                return;
+            }
+            var pre = prefix != null ? AccessTools.Method(typeof(GameSync.NestSync), prefix) : null;
+            var post = postfix != null ? AccessTools.Method(typeof(GameSync.NestSync), postfix) : null;
+            _harmony.Patch(mi,
+                prefix: pre != null ? new HarmonyMethod(pre) : null,
+                postfix: post != null ? new HarmonyMethod(post) : null);
+            CoopRuntime.LogSource?.LogInfo($"Harmony: patched {target.Name}.{method} (explicit args)");
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony: {target.Name}.{method} patch failed: {ex.Message}"); }
+    }
+
     /// <summary>⚠️ 2026-08-26：.Charge Dial 拨动值变化诊断（值源排查）。
     /// DialValueEventWatcher.HandleDialValueChanged(float value) 是拨动值变化的事件回调——patch postfix
     /// 读三个候选字段（accumulatedValue / currentRotationAngle / detentCurrentAngle）+ 注册状态 + 路径，
@@ -262,6 +323,13 @@ public static class HarmonyPatches
 
     private static void PostFireShell(GunController __instance)
     {
+        // ⚠️ 2026-09-05 诊断：确认玩家开火到底走不走 FireShell（决定 GunFire 事件是否有效）。
+        // 之前日志显示"炮弹生成(ShellVisual.Initialize)紧跟在 Starter chain 点击后且 FireShell 无输出"，
+        // 但无法区分是"玩家拉 Trigger chain 开火不走 FireShell"还是"Starter chain 启动引擎的炮击不走 FireShell"。
+        try { CoopRuntime.LogSource?.LogInfo($"[TurretSync] FireShell fired gun='{__instance?.name}'"); } catch { }
+        LogShotFireDiag(__instance);
+        // A1：脚本化模块事件——炮弹发射（两端本地自然触发，脚本模块可订阅 gun.fired）
+        try { OpenNestCoop.GameSync.OncMissionBridge.Raise("gun.fired"); } catch { }
         // 方案感知：--sync new 走 SyncV2 EventLayer（MsgType=200）；默认 old 走 V1 TurretSync（MsgType=11）。
         if (OpenNestCoop.Net.AutoJoin.WantNewSync)
         {
@@ -287,8 +355,33 @@ public static class HarmonyPatches
         return false;
     }
 
+    /// <summary>⚠️ 2026-09-05 诊断：RequestFire 执行后打印 gun 关键状态——对比主机 TriggerFire→RequestFire→
+    /// FireShell 触发 vs 客机 OnGunFire→RequestFire→无 FireShell 时 GunController 内部状态差在哪
+    /// （定位 FireShell 不触发的断点；纯只读，不改机制）。</summary>
+    private static void PostRequestFire(GunController __instance)
+    {
+        try
+        {
+            var net = CoopRuntime.Net;
+            string role = (net == null || !net.IsHost) ? "CLIENT" : "HOST";
+            string can = "?", shell = "?", st = "?";
+            try { can = __instance.CanFire ? "T" : "F"; } catch { }
+            try { shell = __instance.ChamberedShellBlueprint != null ? "Y" : "N"; } catch { }
+            try { if (__instance.artilleryReloadController != null) st = __instance.artilleryReloadController.currentStateIndex.ToString(); } catch { }
+            // ⚠️ fireSequenceStage 仅 BepInEx interop 有，MLL 无 → 不走该字段诊断（两端源码共享需双平台可编译）
+            CoopRuntime.LogSource?.LogInfo($"[TurretSync] RequestFire({role}) gun='{__instance?.name}' canFire={can} chambered={shell} st={st}");
+            // ⚠️ 2026-09-12：客机漏开火根因——膛内无弹时 FireShell 不会触发 → 本发无炮弹/无落点/无照片。
+            // 用日志把"漏发"变成显式事件（st=装填状态机索引，便于对照主机装填流程到哪一步断）。
+            if (shell == "N" && (net == null || !net.IsHost))
+                CoopRuntime.LogSource?.LogWarning($"[TurretSync] CLIENT chamber EMPTY at fire → FireShell 不会触发（本发无炮弹）st={st}");
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony post request fire: {ex.Message}"); }
+    }
+
     private static void PreSpawnOne(CounterBatteryCinematicImpactSpawner __instance)
     {
+        // A1：脚本化模块事件——反炮兵来袭（脚本模块可订阅 counterbattery）
+        try { OpenNestCoop.GameSync.OncMissionBridge.Raise("counterbattery"); } catch { }
         try
         {
             if (OpenNestCoop.Net.AutoJoin.WantNewSync) { SyncV2.CounterBatterySyncV2.Instance.OnLocalSpawn(); return; }
@@ -316,15 +409,103 @@ public static class HarmonyPatches
         _impactEvalCount++;
         try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] EvaluateImpact n={_impactEvalCount} t={UnityEngine.Time.time:0.00} loc=({__1.x:0.00},{__1.y:0.00})"); } catch { }
     }
-    private static void PostShellInit()
+    private static void PostShellInit(ShellVisual __instance)
     {
         _shellInitCount++;
-        try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] ShellVisual.Initialize n={_shellInitCount} t={UnityEngine.Time.time:0.00}"); } catch { }
+        LogShotInitDiag(__instance);
+        try { GameSync.ShotSync.Instance?.OnLocalInit(__instance); } catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ShotSync hook: {ex.Message}"); }
     }
     private static void PostSpawnImpact()
     {
         _impactFxCount++;
         try { CoopLog.Debug("impact.diag", () => $"[ImpactDiag] SpawnImpactEffectAt n={_impactFxCount} t={UnityEngine.Time.time:0.00}"); } catch { }
+    }
+
+    // ---------------- 发射参数诊断（2026-09-12）----------------
+    // 背景：用户质疑“开火参数明明都是一致的，客机落点怎么会不一致”——实测两端落点差 ~0.8、
+    // 飞行时长差 ~1.2s（≈4%）= 典型的“发射参数小幅不同”。两个诊断分别回答：
+    //   1) [ShotDiag] fire：开火那一刻两端的**掷瞄/仰角/装药/射程**是否真的相同（客机复现开火用的是
+    //      它自己那一刻的本地物理状态，仰角是随时间向目标值靠的物理量）。
+    //   2) [ShotDiag] init：这发炮弹**实际的弹道参数**（起点/终点/飞行时长/路径长）两端是否相同。
+    // 若 init 的 target 不同 → 根因在发射参数（下游落点标记/追踪器/照片角度全是它生的）→ 由
+    // ShotSync（发射参数同步）在源头修正，而不是事后把结果改回来。
+    private static void LogShotFireDiag(GunController gun)
+    {
+        try
+        {
+            if (gun == null) return;
+            var net = CoopRuntime.Net;
+            string role = (net == null || !net.IsHost) ? "CLIENT" : "HOST";
+            string shell = "?";
+            string speed = "?";
+            try
+            {
+                var bp = gun.ChamberedShellBlueprint;
+                if (bp != null && bp.shellDefinition != null) shell = bp.shellDefinition.ShellId ?? "?";
+                if (bp != null) speed = bp.GetAdjustedShellSpeed().ToString("0.000");
+            }
+            catch { }
+            float elev = 0f, desElev = 0f, elevErr = 0f, range = 0f, ang = 0f, desRot = 0f;
+            int powder = -1;
+            try { elev = gun.CurrentElevation; } catch { }
+            try { desElev = gun.DesiredElevationAngle; } catch { }
+            try { elevErr = gun.ElevationErrorDeg; } catch { }
+            try { range = gun.CurrentRange; } catch { }
+            try { powder = gun.PowderCharges; } catch { }
+            try { var tt = TurretController.Instance; if (tt != null) { ang = tt.CurrentAngle; desRot = tt.DesiredRotation; } } catch { }
+            string fp = "?", fpw = "?", fpp = "?";
+            try
+            {
+                var f = gun.firePoint;
+                if (f != null)
+                {
+                    var p = f.localPosition; fp = $"({p.x:0.000},{p.y:0.000},{p.z:0.000})";
+                    var wp = f.position; fpw = $"({wp.x:0.000},{wp.y:0.000},{wp.z:0.000})";
+                    fpp = PathOfSync(f);
+                }
+            }
+            catch { }
+            string nm = gun.name ?? "?";
+            CoopLog.Debug("shot.diag", () => $"[ShotDiag] fire role={role} gun='{nm}' shell='{shell}' speed={speed} turretAng={ang:0.0000} desRot={desRot:0.0000} elev={elev:0.0000} desElev={desElev:0.0000} elevErr={elevErr:0.0000} range={range:0.000} powder={powder} firePoint={fp} firePointW={fpw} firePointPath='{fpp}'");
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ShotDiag fire: {ex.Message}"); }
+    }
+
+    /// <summary>这发炮弹的实际弹道参数（两端对照）。</summary>
+    private static void LogShotInitDiag(ShellVisual sv)
+    {
+        try
+        {
+            var net = CoopRuntime.Net;
+            string role = (net == null || !net.IsHost) ? "CLIENT" : "HOST";
+            if (sv == null) return;
+            string shell = "?";
+            try { var d = sv.impactShell; if (d != null) shell = d.ShellId ?? "?"; } catch { }
+            Vector2 s = default, t = default;
+            float dur = 0f, dist = 0f;
+            try { s = sv.startLocalPos; t = sv.targetLocalPos; dur = sv.travelTime; dist = sv.totalPathDistance; } catch { }
+            int n = _shellInitCount;
+            // 弹道坐标系诊断：着弹坐标是 **boardRect 的本地坐标**；若两端 board 不同（世界位置/缩放/父对象），
+            // 则 start/target 会整体平移（实测两端固定差 (-1.100,-0.100)，且 aim/dur/dist 完全相同）。
+            string board = "?", par = "?", wS = "?", wT = "?";
+            try
+            {
+                if (sv.transform.parent != null) par = sv.transform.parent.name ?? "?";
+                var br = sv.boardRect;
+                if (br != null)
+                {
+                    var bp = br.position; var bs = br.lossyScale;
+                    board = $"{br.name}@{bp.x:0.000},{bp.y:0.000},{bp.z:0.000}s({bs.x:0.000},{bs.y:0.000},{bs.z:0.000})";
+                    var ws = br.TransformPoint(new Vector3(s.x, s.y, 0f));
+                    var wt = br.TransformPoint(new Vector3(t.x, t.y, 0f));
+                    wS = $"({ws.x:0.000},{ws.y:0.000},{ws.z:0.000})";
+                    wT = $"({wt.x:0.000},{wt.y:0.000},{wt.z:0.000})";
+                }
+            }
+            catch { }
+            CoopLog.Debug("shot.diag", () => $"[ShotDiag] init role={role} n={n} t={UnityEngine.Time.time:0.00} shell='{shell}' start=({s.x:0.000},{s.y:0.000}) target=({t.x:0.000},{t.y:0.000}) dur={dur:0.000} dist={dist:0.000} board='{board}' parent='{par}' wStart={wS} wTarget={wT}");
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ShotDiag init: {ex.Message}"); }
     }    private static void PostEvalReport(ImpactLocation __instance)
     {
         try
@@ -347,14 +528,12 @@ public static class HarmonyPatches
             catch { }
             var lpD = __instance.transform.localPosition;
             CoopLog.Info("impact.sync4", () => $"[ImpactSync] EvalReport path='{pth}' local=({lpD.x:0.00},{lpD.y:0.00}) parentW=({__instance.transform.position.x:0.00},{__instance.transform.position.z:0.00})", 0.5f);
-            if (net != null && net.IsHost)
+            if (net != null)
             {
-                var lp = __instance.transform.localPosition;
-                GameSync.ImpactSync.Instance?.BroadcastMarkPos(new UnityEngine.Vector2(lp.x, lp.y));
-            }
-            else
-            {
-                GameSync.ImpactSync.Instance?.ApplyTo(__instance);
+                // ⚠️ 2026-09-12 重新设计：落点/照片角度/追踪目标统一交给 ImpactSync：
+                // 主机照游戏原样跑（不改自己的值），排队广播"自己的落点 + 游戏真实 roll 出的照片角度"；
+                // 客机在【本地着弹报告后】与【主机包到达后】各写一次同一个权威值（幂等，无定时窗口）。
+                GameSync.ImpactSync.Instance?.NotifyLocalReport(__instance);
             }
         }
         catch { }
@@ -384,6 +563,8 @@ public static class HarmonyPatches
     /// （对端执行同样解锁逻辑 + 动画）。数值对账由 SequenceSync 主机权威广播。V2 走 SequenceSyncV2（谁变化谁广播）。</summary>
     private static void PreSeqSlotClick(LookAtTargetUnlockSequence5 __instance, int __0)
     {
+        // A1：脚本化模块事件——发射台序列槽点击（载荷 = slot 序号）
+        try { OpenNestCoop.GameSync.OncMissionBridge.Raise("interact.slot", __0); } catch { }
         try
         {
             if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; // V2 由 SequenceSyncV2 处理
@@ -410,29 +591,61 @@ public static class HarmonyPatches
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony powder load: {ex.Message}"); }
     }
 
-    // ---------------- 预备激发（ArmedFireRelayOneShot，事件解耦 P0）----------------
-    // prefix：先广播再放行原方法（本地正常执行 + 对端复现）。IsApplyingArm 防环（应用远端时不再转发）。
-    // ⚠️ 必须 try/catch：prefix 抛异常会中断原方法（ArmLeft 内部置位 + 事件触发）。
-
-    private static void PreArmLeft(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    // ---------------- 仰角联动（GunElevationLinkCoordinator，事件驱动）----------------
+    // postfix：本地切换联动后广播 isLinked（GunLinkSync.OnLocalSetLinked 变化才广播 + 去重）。
+    private static void PostGunLinkSet(GunElevationLinkCoordinator __instance, bool linked, bool doInitialSync)
     {
-        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArm(__instance, ArmSync.C_EvArmLeft); }
+        try { GunLinkSync.OnLocalSetLinked(__instance); }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony gunlink set: {ex.Message}"); }
+    }
+    private static void PostGunLinkToggle(GunElevationLinkCoordinator __instance)
+    {
+        try { GunLinkSync.OnLocalSetLinked(__instance); }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony gunlink toggle: {ex.Message}"); }
+    }
+
+    // ---------------- 预备激发（ArmedFireRelayOneShot，状态同步 2026-09-01）----------------
+    // postfix：方法执行后读 IsLeftArmed/IsRightArmed 广播状态（非事件/点击）。IsApplyingArm 防环。
+    // 点击实际触发 ToggleLeft/ToggleRight（切换语义），故 patch 全部 6 个方法（含 Toggle）。
+    // ⚠️ postfix 抛异常不影响原方法，但仍 try/catch 吞掉防日志刷屏。
+
+    private static void PostArmLeft(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    {
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony arm left: {ex.Message}"); }
     }
-    private static void PreArmRight(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    private static void PostArmRight(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
     {
-        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArm(__instance, ArmSync.C_EvArmRight); }
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony arm right: {ex.Message}"); }
     }
-    private static void PreDisarmLeft(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    private static void PostDisarmLeft(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
     {
-        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArm(__instance, ArmSync.C_EvDisarmLeft); }
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony disarm left: {ex.Message}"); }
     }
-    private static void PreDisarmRight(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    private static void PostDisarmRight(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
     {
-        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArm(__instance, ArmSync.C_EvDisarmRight); }
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony disarm right: {ex.Message}"); }
+    }
+    private static void PostToggleLeft(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    {
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony toggle left: {ex.Message}"); }
+    }
+    private static void PostToggleRight(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    {
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony toggle right: {ex.Message}"); }
+    }
+    private static void PostTriggerFire(Zagreekie.Tools.ArmedFireRelayOneShot __instance)
+    {
+        // ⚠️ 2026-09-05 诊断：确认"拉激发拉环(Trigger chain)"是否触发 TriggerFire（炮系统开火入口）。
+        // ⚠️ 状态同步由 OnLocalArmState 完成：TriggerFire 执行后读 armed 状态，变化才广播（非强制）。
+        try { CoopRuntime.LogSource?.LogInfo($"[TurretSync] TriggerFire fired relay='{__instance?.name}'"); } catch { }
+        try { if (OpenNestCoop.Net.AutoJoin.WantNewSync) return; ArmSync.OnLocalArmState(__instance); }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony trigger fire: {ex.Message}"); }
     }
 
     // ---------------- 弹舱动作（CylinderShellSelector，事件解耦 P1）----------------
@@ -472,6 +685,30 @@ public static class HarmonyPatches
         }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony PreRegisterChild: {ex.Message}"); }
         return true; // 继续原方法（生成照片对象）
+    }
+
+    /// <summary>照片生成后（RegisterChild postfix）：禁用照片的 RandomUIRotation 组件 + 重置旋转——
+    /// 照片带 RandomUIRotation（Awake 用 Unity 内部随机旋转，UnityEngine.Random.InitState 无法控制 →
+    /// 两端照片角度不同）。prefix 时子对象可能未生成，放 postfix 处理（此时 Awake 已执行，需重置旋转）。</summary>
+    private static void PostRegisterChild(MapReconClearHandle __instance, GameObject child)
+    {
+        try
+        {
+            var rrs = child != null ? child.GetComponentsInChildren<RandomUIRotation>(true) : null;
+            int n = rrs != null ? rrs.Length : 0;
+            // 诊断：照片对象结构 + RandomUIRotation 数量（照片方向不同步定位）——photo.angle 路由到 sync.log
+            string nm = "";
+            try { if (child != null && child.transform != null) nm = child.transform.name; } catch { }
+            CoopLog.Info("photo.angle", () => $"[PhotoAngle] RegisterChild child='{nm}' randomUIRotation={n}", 1f);
+            if (rrs != null)
+                foreach (var rr in rrs)
+                {
+                    if (rr == null) continue;
+                    try { rr.enabled = false; } catch { }
+                    try { rr.transform.localRotation = Quaternion.identity; } catch { }
+                }
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony PostRegisterChild: {ex.Message}"); }
     }
 
     // ---------------- 任务过渡事件（完成/失败/重载/回菜单） ----------------
@@ -529,6 +766,8 @@ public static class HarmonyPatches
     /// 主机：放行本地执行 + 广播；客机：拦截本地执行，上报主机（主机权威购买，避免两端重复扣点/双效果）。</summary>
     private static bool PreRequisition(RequisitionSlot __instance)
     {
+        // A1：脚本化模块事件——补给购买/征用点消耗（脚本模块可订阅 requisition.spent）
+        try { OpenNestCoop.GameSync.OncMissionBridge.Raise("requisition.spent"); } catch { }
         try
         {
             if (OpenNestCoop.Net.AutoJoin.WantNewSync) return SyncV2.PurchaseSyncV2.Instance.OnLocalPurchase(__instance);
@@ -583,9 +822,35 @@ public static class HarmonyPatches
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"Harmony PreFireMissionGenerate: {ex.Message}"); }
     }
 
+    /// <summary>列车/移动目标（FireMission.MoveMapEntity 连续移动）：同步移动命令本身——
+    /// 主机触发时广播移动参数（EntityMoveSync），客机用相同参数本地执行 → 两端原生插值轨迹一致。
+    /// 客机本地任务图触发被拦截（防两端各自时间戳插值漂移）；广播驱动执行（IsApplyingRemote）放行。
+    /// ⚠️ 无参 prefix 同时匹配 4参/6参重载（Harmony 按需注入 entity/worldPos 等参数）。
+    /// ⚠️ 2026-09-04：任务图移动节点实际不经过 MoveMapEntity（此 patch 从未触发，保留作兜底）。</summary>
+    private static bool PreMoveMapEntity(MapEntity entity, Vector3 worldPos, bool continousMovement, float timespan)
+    {
+        try
+        {
+            var net = CoopRuntime.Net;
+            if (net != null && net.IsHost)
+            {
+                // 主机：广播移动命令（客机用相同参数执行原生移动），放行本地移动
+                try { if (entity != null) EntityMoveSync.Broadcast(entity.ID, worldPos.x, worldPos.z, continousMovement, timespan, false, 0); } catch { }
+                return true;
+            }
+            // 客机：广播驱动执行放行；本地任务图触发拦截
+            if (EntityMoveSync.IsApplyingRemote) return true;
+            return false;
+        }
+        catch { }
+        return true;
+    }
+
     /// <summary>任务打字机通知：ShowNotification 被调用后 → 主机广播（title/description/lifetime）。</summary>
     private static void PostShowNotification(string __0, string __1, float __2)
     {
+        // A1：脚本化模块事件——UI 通知出现（载荷 = 标题）
+        try { OpenNestCoop.GameSync.OncMissionBridge.Raise("notification.shown", __0); } catch { }
         try
         {
             if (OpenNestCoop.Net.AutoJoin.WantNewSync) { SyncV2.NotificationSyncV2.Instance.OnLocalShow(__0, __1, __2); return; }
@@ -626,6 +891,8 @@ public static class HarmonyPatches
     /// <summary>任务打字机打印：Teleprinter.SubmitLines 被调用后 → 主机广播打印文本行。</summary>
     private static void PostTeleprinterPrint(Teleprinter __instance, string __0, object __1)
     {
+        // A1：脚本化模块事件——打字机打印（脚本模块可订阅 teleprinter.printed）
+        try { OpenNestCoop.GameSync.OncMissionBridge.Raise("teleprinter.printed"); } catch { }
         try
         {
             // 提取打印行。⚠️ 修复（2026-08-13）：游戏传入的 __1 是 Il2CppSystem.Collections.Generic.
@@ -754,6 +1021,22 @@ public static class HarmonyPatches
                 var cur = mm?.CurrentMission;
                 if (cur != null && OpenNestCoop.GameSync.OncMissionBridge.IsNativeCustomGraph(cur))
                 {
+                    // ⚠️ 2026-08-26 客机 NRE 修复：原生 OnEnter 的 ProcessBlock 会对 EntityIDToReplace 里的
+                    // 实体 ID 做替换（TryResolveParameterToEntity），客机端实体可能未生成 → 找不到实体 → NRE
+                    // （`State_TeleprinterText.OnEnter → ProcessBlock → TryResolveParameterToEntity` NRE →
+                    // 打字机打印中断 → 打字针/文本偏移错位）。我们已手动 ProcessBlock 替换 Text（下面），
+                    // 清空 EntityIDToReplace 让原生 ProcessBlock 不再做实体替换 → 不 NRE。自定义图专用，
+                    // 原生任务不受影响（IsNativeCustomGraph 守卫）。
+                    try
+                    {
+                        var el = __instance?.EntityIDToReplace;
+                        if (el != null && el.Count > 0)
+                        {
+                            el.Clear();
+                            CoopLog.Debug("mission.diag", () => $"[MissionDiag] cleared EntityIDToReplace node='{nid}'");
+                        }
+                    }
+                    catch { }
                     if (__instance?.Text != null && __instance.Text.Raw != null && __instance.Text.Raw.IndexOf('<') >= 0)
                     {
                         var raw = __instance.Text.Raw;

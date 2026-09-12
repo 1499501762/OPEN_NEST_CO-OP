@@ -19,7 +19,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class ChargeButtonSync : ISyncedModule
 {
-    public byte MsgType => 143;
+    public int MsgType => 143;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new ChargeButtonSync());
     private float _timer;
     private string _lastSig = "";
     private float _lastSendTime = -10f; // 上次广播时间（用于周期补发）

@@ -1,0 +1,15 @@
+{
+  "Id": "sample.scripted",
+  "DisplayName": "脚本化模块（示例）",
+  "Description": "脚本化模块样板：Scripted 节点按 ModuleName 分派到宿主注册的 C# 脚本模块（或在原生引擎里经 State_CustomTrackingVariable 载体触发）。纯新增任务。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Scripted", "ModuleName": "announce", "ModuleArgs": "{\"title\":\"任务开始\",\"text\":\"脚本化模块已执行\"}", "To": ["n3"] },
+    { "Id": "n3", "Kind": "WaitSeconds", "Seconds": 5, "To": ["n4"] },
+    { "Id": "n4", "Kind": "Scripted", "ModuleName": "ping", "To": ["n5"] },
+    { "Id": "n5", "Kind": "Print", "Message": "脚本化模块演示完成！", "To": ["n6"] },
+    { "Id": "n6", "Kind": "End" }
+  ]
+}

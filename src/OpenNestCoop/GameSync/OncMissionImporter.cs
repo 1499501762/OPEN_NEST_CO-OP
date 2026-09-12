@@ -95,53 +95,130 @@ public static class OncMissionImporter
             case OncNodeKind.WaitSeconds:
                 d["Seconds"] = n.Seconds;
                 break;
+
             case OncNodeKind.Notify:
                 d["Text_Title"] = TextIdentifierJson(n.Title);
                 d["Text_Description"] = TextIdentifierJson(n.Message);
                 d["Duration"] = n.Duration > 0f ? n.Duration : 4f;
                 break;
+
             case OncNodeKind.Teleprinter:
+                // 字段语义见 13.2/13.4：OnlyQueue=false 出字；WaitUntilComplete=false 不卡任务；
+                // AlarmState 简报告警灯；EntityIDToReplace 缺 → OnEnter 遍历 NRE（补空列表）。
                 d["Text"] = TextIdentifierJson(n.Message);
+                d["Printer"] = 0;               // Primary
+                d["OnlyQueue"] = false;
+                d["WaitUntilComplete"] = false;
+                d["AlarmState"] = "Low";
+                d["EntityIDToReplace"] = new List<object>();
                 break;
+
             case OncNodeKind.SpawnEntity:
+                // 参考 `ref/mission editor/Docs/Observador.definition.json` + 13.5 取证。
+                // Role 复合枚举（默认 33=Enemy Field Artillery；要可击杀目标用 131617=Target|EnemyGroup3|Infantry）。
                 d["ID"] = n.EntityId;
-                d["DisplayName"] = n.EntityName ?? n.EntityId;
-                d["Role"] = 33; // Enemy Field Artillery（样例）
+                d["DisplayName"] = TextIdentifierJson(n.EntityName ?? n.EntityId);
+                d["Role"] = ParseRoleInt(n.Role, 33);
+                d["Icon"] = n.Role ?? "Enemy Field Artillery";
                 d["Health"] = n.Health > 0 ? n.Health : 1;
                 d["Armour"] = n.Armour;
                 d["Stars"] = n.Stars;
                 d["NumberToSpawn"] = 1;
+                d["Scale"] = 1;
+                d["StartingState"] = "None";
+                d["PresetIcon"] = true;
+                // ⚠️ 13.5：SetContextVariable=true + LastSpawnedEntity=EntityTarget → 生成后把实体存上下文键，
+                // 配合 WaitEntityDestroyed 的 Entites(FromContext+EntityTarget) 才能正确等待摧毁。
+                d["SetContextVariable"] = true;
+                d["LastSpawnedEntity"] = "EntityTarget";
                 d["LocationToSpawn"] = new Dictionary<string, object> {
-                    ["LocationType"] = 1, ["ZoneID"] = "Enemy", ["FuzzyLocation"] = false, ["RandomiseSubgrid"] = false
+                    ["LocationType"] = 1,       // Zone
+                    ["ZoneID"] = n.Role != null && n.Role.IndexOf("Ally", StringComparison.OrdinalIgnoreCase) >= 0 ? "Allied" : "Enemy",
+                    ["FuzzyLocation"] = true,
+                    ["RandomiseSubgrid"] = true,
+                };
+                d["ImmuneShells"] = new List<object>();
+                break;
+
+            case OncNodeKind.WaitEntityDestroyed:
+                // ⚠️ 13.5：Entites（TargetSelection）为 null → OnExecute 立即通过（不等待）。
+                // 配 FromContext + EntityTarget + All 才真正等待对应实体被摧毁。
+                d["Entites"] = new Dictionary<string, object> {
+                    ["SourceType"] = 0,   // FromContext
+                    ["ContextKey"] = 0,   // EntityContextKeys.EntityTarget
+                    ["CountType"] = 0,    // All
+                    ["Count"] = 0,
                 };
                 break;
+
             case OncNodeKind.DamageEntity:
                 d["EntityFilter"] = n.EntityId;
                 d["Damage"] = n.Value;
                 break;
+
+            case OncNodeKind.MoveEntity:
+                d["LocationToMoveTo"] = GridLocationJson(n.X, n.Y);
+                if (n.Smooth) d["Duration"] = n.Seconds > 0f ? n.Seconds : 3f;
+                break;
+
+            case OncNodeKind.SetEntityState:
+                d["StateToAdd"] = n.Role ?? "Destroyed";
+                d["StateValue"] = n.Value;
+                break;
+
+            case OncNodeKind.Impact:
+                d["LocationHit"] = GridLocationJson(n.X, n.Y);
+                break;
+
             case OncNodeKind.AddRequisitionPoints:
                 d["Amount"] = n.Value;
                 break;
+
             case OncNodeKind.AddPowderCharge:
                 d["Amount"] = n.Value;
                 break;
+
             case OncNodeKind.AddShell:
                 d["ShellType"] = n.ShellId;
                 d["Amount"] = n.Value;
                 break;
+
             case OncNodeKind.StartTimer:
+            case OncNodeKind.WaitTimerExpired: // State_GenericTimer 兜底：跑一个命名计时器
                 d["TimerName"] = n.TimerId;
                 d["Duration"] = n.Seconds;
                 break;
+
             case OncNodeKind.StopTimer:
             case OncNodeKind.PauseTimer:
             case OncNodeKind.ResumeTimer:
                 d["TimerName"] = n.TimerId;
                 break;
+
             case OncNodeKind.AddTimerTime:
                 d["TimerName"] = n.TimerId;
                 d["Time"] = n.Seconds;
                 break;
+
+            case OncNodeKind.WaitForEvent:
+                d["NotificationID"] = n.EventId;
+                break;
+
+            case OncNodeKind.SceneNotification:
+                d["NotifID"] = n.NotifId;
+                break;
+
+            case OncNodeKind.UnlockSceneObject:
+                d["UnlockedSceneObjects"] = new List<object> { n.NotifId };
+                break;
+
+            case OncNodeKind.Scripted:
+                // 脚本化模块 → 原生 State_CustomTrackingVariable 载体：
+                // variableName="onc.script.<name>"，桥接层 Update 轮询 CurrentState 进入该节点时分派脚本模块。
+                d["variableName"] = "onc.script." + n.ModuleName;
+                d["CustomVariableKey"] = n.ModuleName;
+                break;
+
             case OncNodeKind.End:
                 d["ForceSetState"] = false;
                 break;
@@ -149,6 +226,7 @@ public static class OncMissionImporter
         return d;
     }
 
+    /// <summary>文本标识（TextIdentifier：Raw + 空 Key；ImportMission 需 RepairImportedTexts 回填）。</summary>
     private static object TextIdentifierJson(string raw)
     {
         var d = new Dictionary<string, object>();
@@ -157,7 +235,34 @@ public static class OncMissionImporter
         return d;
     }
 
-    /// <summary>OncNodeKind → 原生 State_* 节点类型名。</summary>
+    /// <summary>网格坐标（GridLocation：Location 网格名 + X/Y）。</summary>
+    private static object GridLocationJson(float x, float y)
+    {
+        var d = new Dictionary<string, object>();
+        d["Location"] = "";
+        d["X"] = x;
+        d["Y"] = y;
+        return d;
+    }
+
+    /// <summary>Role 字符串 → 复合枚举 int（数字原样；别名查表；未知默认 33=Enemy Field Artillery）。</summary>
+    private static int ParseRoleInt(string role, int fallback)
+    {
+        if (string.IsNullOrEmpty(role)) return fallback;
+        if (int.TryParse(role, out int v)) return v;
+        // 13.5：Target|EnemyGroup3|Infantry = 131617（可被 ImpactTracker 识别为炮击目标）
+        if (role.IndexOf("Target", StringComparison.OrdinalIgnoreCase) >= 0)
+            return 131617;
+        if (role.IndexOf("Ally", StringComparison.OrdinalIgnoreCase) >= 0)
+            return 6; // Ally, Infantry（参考样例 Role=6）
+        if (role.IndexOf("Enemy", StringComparison.OrdinalIgnoreCase) >= 0)
+            return 33;
+        return fallback;
+    }
+
+    /// <summary>OncNodeKind → 原生 State_* 节点类型名（权威目录见 docs/NODE_CATALOGUE.md / memory）。
+    /// ⚠️ 事件类等待（WaitForEvent/WaitTimerExpired）原生语义是 Event_* 节点接线，这里用最接近的 State 节点
+    /// 兜底（可在原生 JSON 里手写精确 Event 接线）；Objective 系需完整 ObjectiveGraph 引用，见 13.5 限制。</summary>
     private static string MapNodeType(OncNodeKind k)
     {
         switch (k)
@@ -168,10 +273,13 @@ public static class OncMissionImporter
             case OncNodeKind.WaitSeconds: return "State_WaitSeconds";
             case OncNodeKind.WaitForEvent: return "State_WaitForNotification";
             case OncNodeKind.WaitEntityDestroyed: return "State_WaitEntityDestroyed";
+            case OncNodeKind.WaitTimerExpired: return "State_GenericTimer";
             case OncNodeKind.Branch: return "State_ConditionBranch";
             case OncNodeKind.RandomBranch: return "State_RandomBranch";
             case OncNodeKind.Split: return "State_SplitBranch";
             case OncNodeKind.Objective: return "State_Objective";
+            case OncNodeKind.ObjectiveComplete: return "State_Objective";
+            case OncNodeKind.ObjectiveFail: return "State_Objective";
             case OncNodeKind.Teleprinter: return "State_TeleprinterText";
             case OncNodeKind.Notify: return "State_SendUINotification";
             case OncNodeKind.SceneNotification: return "State_SendSceneNotification";
@@ -189,6 +297,7 @@ public static class OncMissionImporter
             case OncNodeKind.ResumeTimer: return "State_UnpauseTimer";
             case OncNodeKind.AddTimerTime: return "State_TimerAddTime";
             case OncNodeKind.UnlockSceneObject: return "State_UnlockSceneObject";
+            case OncNodeKind.Scripted: return "State_CustomTrackingVariable";
             default: return "State_TestNode";
         }
     }

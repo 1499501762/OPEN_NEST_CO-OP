@@ -16,15 +16,18 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class ReconPhotoSync : ISyncedModule
 {
-    public byte MsgType => 105;
+    public int MsgType => 105;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new ReconPhotoSync());
     public static ReconPhotoSync Instance;
 
     private int _seed;        // 主机：递增种子
     private int _pendingSeed; // 客户端：最近收到的种子
     private bool _havePending;
     private int _localSeq;    // 客户端：本地拍照序号（收到新主机 seed 时重置，对齐主机递增）
-    private float _pendingPosX, _pendingPosY; // 客户端：最近收到的主机照片位置（本地坐标，相对战术地图）
-    private bool _havePendingPos;
+    // ⚠️ 2026-08-26：照片位置/方向由 MapTokenSync 统一同步（照片 = MapToken_Recon），ReconPhotoSync 只同步 seed。
 
     public ReconPhotoSync() { Instance = this; }
 
@@ -33,7 +36,10 @@ public sealed class ReconPhotoSync : ISyncedModule
     /// 客户端连续拍照或 seed 到达延迟时用本地 Random → 照片拍摄方向不同（“着弹点照片方向不同步”根因）。
     /// 改为：客户端保留最新 seed，拍照用 `_pendingSeed + _localSeq` 本地递增近似主机递增（两端拍照计数一致时方向一致）。
     /// ⚠️ 2026-08-25：照片**位置**同步——seed 只同步内容，位置由各端本地相机算 → 战术地图上照片位置两端不同。
-    /// 主机拍照广播照片对象本地坐标（相对战术地图），客机应用到自己的照片对象（两端 Tactical Map 位置一致）。</summary>
+    /// 主机拍照广播照片对象本地坐标（相对战术地图），客机应用到自己的照片对象（两端 Tactical Map 位置一致）。
+    /// ⚠️ 2026-08-26 照片位置/方向由 MapTokenSync 统一同步（照片 = MapToken_Recon，非拖拽也广播位置+方向）——
+    /// ReconPhotoSync **只同步 seed（照片内容）**，不设照片位置（避免与 MapTokenSync 双重同步争抢 →
+    /// "照片方向不同步"根因）。</summary>
     public void OnLocalPhoto(GameObject child)
     {
         var net = CoopRuntime.Net;
@@ -44,10 +50,8 @@ public sealed class ReconPhotoSync : ISyncedModule
             {
                 _seed++;
                 UnityEngine.Random.InitState(_seed);
-                float px = 0f, py = 0f; bool hasPos = false;
-                try { if (child != null && child.transform != null) { var lp = child.transform.localPosition; px = lp.x; py = lp.y; hasPos = true; } } catch { }
-                CoopRuntime.LogSource?.LogInfo($"[ReconPhoto] host photo seed={_seed} broadcast pos={hasPos}");
-                BroadcastSeedAndPos(net, _seed, hasPos, px, py);
+                CoopRuntime.LogSource?.LogInfo($"[ReconPhoto] host photo seed={_seed} broadcast");
+                BroadcastSeed(net, _seed);
             }
             else
             {
@@ -56,17 +60,8 @@ public sealed class ReconPhotoSync : ISyncedModule
                     UnityEngine.Random.InitState(_pendingSeed + _localSeq);
                     CoopRuntime.LogSource?.LogInfo($"[ReconPhoto] client photo seed={_pendingSeed}+{_localSeq}={_pendingSeed + _localSeq}");
                     _localSeq++; // 保留 _havePending：客户端可能连续拍照，本地序号递增近似主机递增
-                    // 应用主机照片位置（本地坐标，相对战术地图）
-                    if (_havePendingPos && child != null && child.transform != null)
-                    {
-                        try
-                        {
-                            var lp = child.transform.localPosition;
-                            lp.x = _pendingPosX; lp.y = _pendingPosY;
-                            child.transform.localPosition = lp;
-                        }
-                        catch { }
-                    }
+                    // ⚠️ 2026-08-26：照片位置/方向由 MapTokenSync 同步（照片 = MapToken_Recon），
+                    // 此处不设 child 位置（避免双重同步争抢）。
                 }
                 else
                 {
@@ -90,13 +85,8 @@ public sealed class ReconPhotoSync : ISyncedModule
             _pendingSeed = r.GetInt();
             _havePending = true;
             _localSeq = 0; // 收到新主机 seed：本地序号重置（对齐主机当前拍照序号）
-            try
-            {
-                _havePendingPos = r.GetByte() != 0;
-                if (_havePendingPos) { _pendingPosX = r.GetFloat(); _pendingPosY = r.GetFloat(); }
-                else _havePendingPos = false;
-            }
-            catch { _havePendingPos = false; }
+            // ⚠️ 2026-08-26：照片位置/方向由 MapTokenSync 同步，此处只读 seed（跳过位置字段，兼容旧格式）
+            // 不再读位置（避免双重同步争抢）。
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"ReconPhotoSync OnPacket: {ex.Message}"); }
     }
@@ -107,15 +97,12 @@ public sealed class ReconPhotoSync : ISyncedModule
     public void Reset()
     {
         _seed = 0; _pendingSeed = 0; _havePending = false; _localSeq = 0;
-        _pendingPosX = 0; _pendingPosY = 0; _havePendingPos = false;
     }
 
-    private void BroadcastSeedAndPos(NetManager net, int seed, bool hasPos, float px, float py)
+    private void BroadcastSeed(NetManager net, int seed)
     {
         var w = NetProtocol.Begin((MsgType)MsgType);
         w.Put(seed);
-        w.Put(hasPos ? (byte)1 : (byte)0);
-        w.Put(px); w.Put(py);
         var data = NetProtocol.Snapshot(w);
         // ⚠️ 直发 Transport.Send 未达客机 → 改用 EnqueueBatch 合包（已知工作，照片 seed 也走合包）
         net.EnqueueBatch(data, true, true);

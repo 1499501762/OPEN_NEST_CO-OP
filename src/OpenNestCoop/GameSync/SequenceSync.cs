@@ -19,7 +19,15 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class SequenceSync : ISyncedModule
 {
-    public byte MsgType => 110;
+    public int MsgType => 110;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册；同时注册中途加入快照
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister()
+    {
+        CoopSyncRegistry.PendingRegister(false, () => new SequenceSync());
+        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("sequence", BuildSequenceSnapshot, ApplySequenceSnapshot));
+    }
     private const float Interval = 0.5f;
     private float _timer;
     /// <summary>序列对象 → 最近一次已知状态签名（检测变化才广播）。static：Apply 复现后也更新（防环）。</summary>

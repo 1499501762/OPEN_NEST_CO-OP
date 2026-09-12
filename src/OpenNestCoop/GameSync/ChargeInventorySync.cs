@@ -20,7 +20,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class ChargeInventorySync : ISyncedModule
 {
-    public byte MsgType => 142;
+    public int MsgType => 142;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new ChargeInventorySync());
     private float _timer;
     private int _lastHostCharges = -1;
     private int _sendLog;

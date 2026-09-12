@@ -15,6 +15,10 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public static class RecordPlayerSync
 {
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案，仅快照注册），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("recordplayer", BuildRecordPlayerSnapshot, ApplyRecordPlayerSnapshot));
+
     private const float Interval = 0.2f;
     private const float VolumeDeadzone = 0.01f;
 
@@ -42,6 +46,8 @@ public static class RecordPlayerSync
     {
         var net = CoopRuntime.Net;
         if (net == null) return;
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）：关 → 不同步唱片机（不发也不上行）
+        if (!CoopConfig.RecordPlayerSync) return;
 
         _timer += dt;
         if (_timer < Interval) return;
@@ -85,6 +91,8 @@ public static class RecordPlayerSync
     {
         var net = CoopRuntime.Net;
         if (net == null || !net.IsHost) return;
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）
+        if (!CoopConfig.RecordPlayerSync) return;
         try
         {
             var r = new NetDataReader(data);
@@ -109,6 +117,8 @@ public static class RecordPlayerSync
     {
         var net = CoopRuntime.Net;
         if (net == null || net.IsHost) return;
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）
+        if (!CoopConfig.RecordPlayerSync) return;
         try
         {
             var r = new NetDataReader(data);
@@ -239,6 +249,8 @@ public static class RecordPlayerSync
     /// <summary>中途加入：主机构建当前唱片机状态快照（供 StateSnapshotSync 打包）。</summary>
     public static byte[] BuildRecordPlayerSnapshot()
     {
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）：关 → 不发中途加入快照
+        if (!CoopConfig.RecordPlayerSync) return null;
         try
         {
             var rp = GetRecordPlayer();
@@ -257,6 +269,8 @@ public static class RecordPlayerSync
     /// <summary>中途加入：新成员应用唱片机状态快照。</summary>
     public static void ApplyRecordPlayerSnapshot(byte[] data)
     {
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）：关 → 不应用中途加入快照
+        if (!CoopConfig.RecordPlayerSync) return;
         try
         {
             var r = new NetDataReader(data);

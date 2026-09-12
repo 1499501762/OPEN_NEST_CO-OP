@@ -81,7 +81,7 @@ public class InteractableNameTool : MonoBehaviour
                     }
                 }
             }
-            _text = $"[F9 循环] 交互工具 (3/3)  [F10复制]\n交互名='{target.name}'\n路径: {PathOf(target.transform)}\n组件: {ComponentsOf(target)}\n命中: {go.name}";
+            _text = $"[F9 循环] 交互工具 (4/4)  [F10复制]\n交互名='{target.name}'\n路径: {PathOf(target.transform)}\n组件: {ComponentsOf(target)}\n命中: {go.name}" + SyncStatus(lat);
         }
         catch (System.Exception ex)
         {
@@ -89,12 +89,25 @@ public class InteractableNameTool : MonoBehaviour
         }
     }
 
+    /// <summary>附一行“同步状态”（帮助判断这个交互实体到底有没有被同步：
+    /// 点击复现（ButtonClickSync）是否跟踪——**已含配置开关判定**，如 Calculate Universal Button 默认关）。</summary>
+    private static string SyncStatus(LookAtTarget lat)
+    {
+        try
+        {
+            if (lat == null) return "\n同步(点击复现): 不适用(非 LookAtTarget 按钮)";
+            bool tracked = OpenNestCoop.GameSync.ButtonClickSync.IsTracked(lat);
+            return "\n同步(点击复现): " + (tracked ? "开" : "关") + "  [CoopConfig " + OpenNestCoop.Core.CoopConfig.Summary() + "]";
+        }
+        catch (System.Exception ex) { return "\n同步(点击复现): ? (" + ex.Message + ")"; }
+    }
+
     private void OnGUI()
     {
         if (!_show || string.IsNullOrEmpty(_text)) return;
         // ⚠️ 2026-08-25：统一到右上角（与帧/网络诊断共用位置——F9 循环同时只显示一个）。
-        // 加高（4 行文本 + 长路径）避免截断。
-        GUI.Label(new Rect(Screen.width - 460, 12, 448, 180), _text);
+        // 加高（4 行文本 + 长路径 + 同步状态行）避免截断。
+        GUI.Label(new Rect(Screen.width - 460, 12, 448, 200), _text);
     }
 
     private static string PathOf(Transform t)

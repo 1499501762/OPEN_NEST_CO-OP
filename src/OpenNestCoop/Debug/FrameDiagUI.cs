@@ -249,7 +249,7 @@ public class FrameDiagUI : MonoBehaviour
     {
         var p = FrameProfiler.Instance;
         _lines.Clear();
-        _lines.Add(("[F9 循环] 帧性能诊断 (1/3)", "", Sk.Title));
+        _lines.Add(("[F9 循环] 帧性能诊断 (1/4)", "", Sk.Title));
         double fps = p.FramesPerSec;
         double avg = p.AvgFrameMs;
         double worst = p.WorstFrameMs;

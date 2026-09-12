@@ -19,7 +19,17 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class StateSnapshotSync : ISyncedModule
 {
-    public byte MsgType => 30;
+    public int MsgType => 30;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    // ⚠️ 2026-09-12 回退 extraTypes={31}：该改动（此前为修"打字机开局未同步"）让客机的快照重发请求
+    // MsgType=31 真正路由生效 → 客机进炮台场景时主动 RequestSnapshot → 主机重发**所有模块**全量快照
+    // （含 ReloadSync applyState=1）→ 客机 ReloadSync 被 SetState 强拉到主机当前 st（主机装填状态机进任务
+    // 后自动演进，如已在 st=2）→ **客机开局"直接跳第二个灯"**（本地 0→1→2 的正常演进被跳过）。
+    // 且打字机已改为 EvPrint/EvState 驱动（不再依赖快照重发），extraTypes={31} 已无必要。
+    // 中途加入的装填对齐仍由主机 OnLateJoin → ReloadSync.SendFullStateTo（pending 重试）负责。
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new StateSnapshotSync());
 
     private sealed class Provider
     {

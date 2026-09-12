@@ -15,6 +15,7 @@
 - 2026-08-23 第六节映射更新为完整图模型（`OncNode`/`OncOperation`）；自定义任务框架见 `docs/CUSTOM_MISSION.md`。
 - 2026-08-25 五/六节更新：`MissionSync`/`MissionSyncV2` 广播增加 `@c:<MissionID>` 自定义任务前缀（防 scene 名撞原生卡片进错任务）+ 任务图当前节点 nodeId（同步序号）；Core `OncMissionSyncState` 补 `DoneNodeIds` + `OncMissionRuntime.ApplySyncState` 闭环 `BuildSyncState`。
 - 2026-08-25 客机不进任务修复：①`GetMissionId` 对 `'MissionBase'`（无区分度默认场景名）回退广播 `CurrentMission.MissionID`（客机可按 MissionID 匹配卡片）；②`TryLoadMissionScene` 移除直接调 `m.LoadMission`（MLL interop 签名不匹配 → Method not found），改用 `card.ActivateMission()`/`StartOperation`；③失败不再 `LoadMainMenu`/`EnterBrowsingMap`（避免拉回选任务界面，保持现状等主机保活重发）。
+- 2026-08-31 第六节映射 ↔ `src/OpenNestCore/Tasks/*.cs` 核对：`OncNodeKind` 全类别 / `OncOperation`(前置后置) / `OncMission.Requires` / `OncMissionRuntime.BuildSyncState`/`ApplySyncState` 与代码一致，无改动。
 
 ## 一、总览：任务是「节点图状态机」，不是「任务列表」
 

@@ -5,9 +5,9 @@ namespace OpenNestCoop.Net;
 /// <summary>联机消息类型。前导字节为消息类型。</summary>
 public enum MsgType : byte
 {
-    /// <summary>客户端 -&gt; 主机：自我介绍（携带昵称）</summary>
+    /// <summary>客户端 -&gt; 主机：自我介绍（携带昵称）+ 注册通道表上行（NetManager 注册管理器）</summary>
     Hello = 1,
-    /// <summary>主机 -&gt; 客户端：分配玩家序号 + 全量名单</summary>
+    /// <summary>主机 -&gt; 客户端：分配玩家序号 + 全量名单 + 主机权威注册通道表下发（NetManager 注册管理器）</summary>
     Welcome = 2,
     /// <summary>主机 -&gt; 全员：全量名单更新</summary>
     Roster = 3,
@@ -82,6 +82,8 @@ public enum MsgType : byte
     ControlFull = 145 // ValueSync 向量全量同步包（主机权威低频：整体签名变化才发全量绑定值，reliable 覆盖式应用）
     ,   NestMove = 146 // ⚠️ 2026-08-26：铁巢（TurretController）位置同步——主机权威，patch MoveTurret/SetTurretLocation
     //  广播位置（对齐 Synchrony NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
+    // ⚠️ 新增消息类型不再在此硬编码枚举：MsgType 改为函数注册，由 NetManager 注册管理器统一分配
+    //   （稳定 channelKey 自注册 → ChannelType(key) 取分配前导字节），见 CoffeeSync/MissionScriptSync。
 }
 
 public static class NetProtocol
@@ -92,15 +94,52 @@ public static class NetProtocol
     private const int MaxPooledWriters = 64;
     private static readonly System.Collections.Generic.Stack<NetDataWriter> _writerPool = new();
 
-    public static NetDataWriter Begin(MsgType type)
+    /// <summary>前导字节宽度（1=1 字节 MsgType，2=2 字节 ushort 大端）。1 字节空间用尽时由注册管理器
+    /// （NetManager.AllocateType）自动扩展为 2；经前导字节 1/2（Hello/Welcome）握手自动沟通，双端必须一致。</summary>
+    public static int HeaderWidth = 1;
+
+    /// <summary>本端协议前导字节数（按 HeaderWidth 折算；分片/统计等按此解析类型字节数）。</summary>
+    public static int TypeLen => HeaderWidth >= 2 ? 2 : 1;
+
+    /// <summary>bootstrap 控制消息（Hello=1/Welcome=2）：无论 HeaderWidth 恒为 1 字节前导——
+    /// 握手前接收端尚不知宽度，须按默认 1 字节解析；类型字节恰为 1/2 时也按 1 字节读。</summary>
+    private static bool IsBootstrapType(int type) => type == 1 || type == 2;
+
+    /// <summary>Begin 一个 MsgType（byte 枚举，现有 1-255 类型）。</summary>
+    public static NetDataWriter Begin(MsgType type) => BeginImpl((int)type);
+
+    /// <summary>Begin 一个任意类型（int，支持 2 字节扩展类型 ≥256）。</summary>
+    public static NetDataWriter Begin(int type) => BeginImpl(type);
+
+    private static NetDataWriter BeginImpl(int type)
     {
         var w = _writerPool.Count > 0 ? _writerPool.Pop() : new NetDataWriter();
         w.Reset(); // LiteNetLib Reset() 只重置位置，保留已分配的内部 buffer
-        w.Put((byte)type);
+        if (HeaderWidth >= 2 && !IsBootstrapType(type))
+        {
+            // 2 字节前导：大端 ushort（bootstrap Hello/Welcome 恒 1 字节，保证握手可解析）
+            w.Put((byte)(type >> 8));
+            w.Put((byte)(type & 0xFF));
+        }
+        else
+        {
+            w.Put((byte)type);
+        }
         return w;
     }
 
-    public static MsgType TypeOf(NetDataReader r) => (MsgType)r.GetByte();
+    /// <summary>读前导字节类型（返回 int，兼容 2 字节扩展）。宽度由本端 <see cref="HeaderWidth"/> 决定；
+    /// 恒 1 字节的 bootstrap（值 ≤2）始终按 1 字节读。</summary>
+    public static int TypeOf(NetDataReader r)
+    {
+        int b0 = r.GetByte();
+        if (HeaderWidth >= 2 && b0 > 2)
+        {
+            int b1 = r.GetByte();
+            return (b0 << 8) | b1;
+        }
+        return b0;
+    }
 
     /// <summary>从 writer 取出完整字节数组（副本，安全），并把 writer 归还池（内部 buffer 复用）。</summary>
     public static byte[] Snapshot(NetDataWriter w)

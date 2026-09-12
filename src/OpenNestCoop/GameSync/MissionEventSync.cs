@@ -15,7 +15,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class MissionEventSync : ISyncedModule
 {
-    public byte MsgType => 130;
+    public int MsgType => 130;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new MissionEventSync());
 
     // 事件类型
     public const byte EvFinish = 1;           // FinishMission()

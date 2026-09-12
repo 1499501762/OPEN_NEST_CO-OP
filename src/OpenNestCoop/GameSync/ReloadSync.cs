@@ -30,6 +30,7 @@ public static class ReloadSync
     internal sealed class GunReload
     {
         public int Index;
+        public GunController Gun;
         public ArtilleryReloadController Reload;
         public PowderChargeController Powder;
         // 主机已知状态（变化检测广播）
@@ -743,13 +744,17 @@ public static class ReloadSync
                         if (pc == null || pc.reloadController == null) continue;
                         if (pc.reloadController.Pointer == reload.Pointer) { powder = pc; break; }
                     }
-                var gr = new GunReload { Index = i, Reload = reload, Powder = powder };
+                var gr = new GunReload { Index = i, Gun = gun, Reload = reload, Powder = powder };
                 _guns.Add(gr);
                 // ⚠️ 2026-08-23 诊断：打印每门炮的名字——确认两端 turret.guns 索引是否对齐
                 // （推弹头 CylinderActionSync 已因索引错位改用 gunKey；ReloadSync 仍用 idx，若两端顺序不同会错位）。
                 string gname = "?";
                 try { if (gun.transform != null) gname = gun.transform.name; } catch { }
-                CoopRuntime.LogSource?.LogInfo($"[ReloadSync] gun{i} name='{gname}'");
+                // ⚠️ 2026-09-05 诊断：膛内有无弹（ChamberedShellBlueprint 只读，非弹舱/CylinderShellSelector）——
+                // 定位开火同步断点（主机膛内有弹→FireShell；客机膛内无弹→FireShell 不触发）。
+                string chmb = "?";
+                try { chmb = gun.ChamberedShellBlueprint != null ? "Y" : "N"; } catch { }
+                CoopRuntime.LogSource?.LogInfo($"[ReloadSync] gun{i} name='{gname}' chambered={chmb}");
                 // 一次性诊断：打印装填步骤（key + displayName + 推进按钮），理解装药/锁膛拉杆
                 if (!_statesDumped && reload.reloadStates != null)
                 {

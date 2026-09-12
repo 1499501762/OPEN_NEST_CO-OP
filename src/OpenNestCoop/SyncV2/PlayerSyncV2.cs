@@ -28,7 +28,11 @@ public sealed class PlayerSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Player;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Player;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     private const float Interval = 0.1f;      // 10Hz
     private const float PosDeadzone = 0.03f;

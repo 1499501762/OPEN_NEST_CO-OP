@@ -46,6 +46,9 @@ public sealed class OncMissionRuntime
     public event Action<OncMissionRuntime> OnCanceled;
     public event Action<OncMissionRuntime, OncObjective> OnObjectiveChanged;
 
+    /// <summary>计时器到期事件（A2：计时器归零时触发，参数 = timerId）。</summary>
+    public event Action<OncMissionRuntime, string> OnTimerExpired;
+
     // ---- 内部状态 ----
     private sealed class ActiveNode
     {
@@ -139,6 +142,12 @@ public sealed class OncMissionRuntime
 
                 case OncNodeKind.WaitTimerExpired:
                     if (TimerExpired(a.Node.TimerId))
+                        CompleteNode(a.Node.Id);
+                    break;
+
+                case OncNodeKind.ScriptedWait:
+                    // B2：每帧问脚本模块"好了没"（BoolResult=true 才完成沿出边继续）
+                    if (Host == null || Host.RunScriptedWait(BuildScriptCtx(a.Node)))
                         CompleteNode(a.Node.Id);
                     break;
             }
@@ -267,6 +276,11 @@ public sealed class OncMissionRuntime
                     Status = (int)kv.Value.Status,
                     Progress = kv.Value.Progress,
                 });
+        // A4：任务变量（脚本模块可读写 Variables；字符串化进同步负载）
+        s.Variables = new List<OncScriptVarState>();
+        foreach (var kv in Variables)
+            if (kv.Key != null && kv.Value != null)
+                s.Variables.Add(new OncScriptVarState { Name = kv.Key, Value = ObjectToString(kv.Value) });
         s.IsFinished = IsFinished;
         s.IsSuccess = IsSuccess;
         return s;
@@ -315,6 +329,15 @@ public sealed class OncMissionRuntime
                 o.Status = (OncObjectiveStatus)os.Status;
                 o.Progress = os.Progress;
                 try { OnObjectiveChanged?.Invoke(this, o); } catch { }
+            }
+
+        // A4：任务变量对齐（脚本模块变量；字符串值）
+        if (s.Variables != null)
+            for (int i = 0; i < s.Variables.Count; i++)
+            {
+                var vs = s.Variables[i];
+                if (vs == null || string.IsNullOrEmpty(vs.Name)) continue;
+                Variables[vs.Name] = vs.Value;
             }
 
         // 结束标记
@@ -378,7 +401,17 @@ public sealed class OncMissionRuntime
             case OncNodeKind.Branch:
             case OncNodeKind.WaitEntityDestroyed:
             case OncNodeKind.WaitTimerExpired:
+            case OncNodeKind.ScriptedWait:
                 return; // 挂起，等 Update / Raise
+
+            case OncNodeKind.ScriptedCondition:
+                // B1：脚本化条件——问脚本模块布尔结果，true 走 To[0]、false 走 To[1]
+                {
+                    bool r = Host != null && Host.RunScriptedCondition(BuildScriptCtx(node));
+                    int idx = r ? 0 : (node.To.Count > 1 ? 1 : 0);
+                    CompleteNodeAt(node.Id, idx);
+                }
+                return;
 
             case OncNodeKind.End:
                 Complete();
@@ -470,6 +503,11 @@ public sealed class OncMissionRuntime
                     Host?.UnlockSceneObject(n.NotifId);
                     break;
 
+                case OncNodeKind.Scripted:
+                    // 脚本化模块：按名分派到宿主注册的脚本模块（C# 回调 / JSON 解释执行）
+                    Host?.RunScriptedModule(BuildScriptCtx(n));
+                    break;
+
                 case OncNodeKind.Custom:
                     if (n.Action != null)
                     {
@@ -513,6 +551,48 @@ public sealed class OncMissionRuntime
         CheckAutoComplete();
     }
 
+    /// <summary>完成节点但只激活指定出边（B1 脚本化条件：按脚本结果选 To[toIndex]；越界回退 To[0]）。</summary>
+    private void CompleteNodeAt(string id, int toIndex)
+    {
+        var node = Mission.Node(id);
+        RemoveActive(id);
+        _done.Add(id);
+        if (node != null) { try { OnNodeCompleted?.Invoke(this, node); } catch { } }
+        if (node != null && node.To.Count > 0)
+        {
+            int idx = toIndex < 0 ? 0 : (toIndex < node.To.Count ? toIndex : 0);
+            ActivateNode(node.To[idx]);
+        }
+        CheckAutoComplete();
+    }
+
+    /// <summary>构造脚本模块执行上下文（Scripted / ScriptedCondition / ScriptedWait 共用）。</summary>
+    private OncScriptContext BuildScriptCtx(OncNode n)
+    {
+        return new OncScriptContext
+        {
+            ModuleName = n != null ? n.ModuleName : null,
+            Args = n != null ? n.ModuleArgs : null,
+            Mission = Mission,
+            Runtime = this,
+            Host = Host,
+            DeltaTime = _lastDt,
+            Time = Elapsed,
+            Variables = Variables,
+        };
+    }
+
+    /// <summary>变量值 → 字符串（同步负载用；bool/float/double/long/int 保精度，其余 ToString）。</summary>
+    private static string ObjectToString(object v)
+    {
+        if (v is bool b) return b ? "true" : "false";
+        if (v is float f) return f.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (v is double d) return d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (v is long l) return l.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (v is int i) return i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return v == null ? null : v.ToString();
+    }
+
     /// <summary>完成节点但只激活指定目标（事件路由精确分流）。</summary>
     private void CompleteNodeThenActivate(string id, string targetId)
     {
@@ -551,8 +631,15 @@ public sealed class OncMissionRuntime
         {
             var k = keys[i];
             if (_timersPaused.Contains(k)) continue;
-            float rem = _timers[k] - dt;
+            float before = _timers[k];
+            float rem = before - dt;
             _timers[k] = rem < 0f ? 0f : rem;
+            // A2：计时器本次归零 → 通知宿主转发 "timer.expired.<id>" 事件（脚本模块可订阅）
+            if (before > 0f && _timers[k] <= 0f)
+            {
+                try { Host?.OnTimerExpired(k); } catch { }
+                try { OnTimerExpired?.Invoke(this, k); } catch { }
+            }
         }
     }
 
@@ -604,6 +691,7 @@ public sealed class OncMissionSyncState
     public List<string> DoneNodeIds;      // 已完成节点 ID 集合（精确恢复用）
     public List<string> ActiveNodeIds;    // 当前激活（挂起）节点
     public List<OncObjectiveState> Objectives;
+    public List<OncScriptVarState> Variables; // A4：任务变量（字符串化）
 }
 
 /// <summary>目标同步状态（供"同步序号"负载）。</summary>
@@ -612,4 +700,11 @@ public sealed class OncObjectiveState
     public string Id;
     public int Status;
     public int Progress;
+}
+
+/// <summary>任务变量同步状态（A4：脚本模块可读写 Variables；值字符串化）。</summary>
+public sealed class OncScriptVarState
+{
+    public string Name;
+    public string Value;
 }

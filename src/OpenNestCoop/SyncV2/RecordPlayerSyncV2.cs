@@ -23,7 +23,11 @@ public sealed class RecordPlayerSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Record;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Record;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     private const float Interval = 0.2f;
     private const float VolumeDeadzone = 0.01f;
@@ -47,6 +51,8 @@ public sealed class RecordPlayerSyncV2 : ISyncedModule
     public void Tick(float dt)
     {
         if (!Store.IsOnline) return;
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）：关 → 不同步唱片机
+        if (!CoopConfig.RecordPlayerSync) return;
         _timer += dt;
         if (_timer < Interval) return;
         _timer = 0f;
@@ -78,6 +84,8 @@ public sealed class RecordPlayerSyncV2 : ISyncedModule
 
     public void OnPacket(ulong from, byte[] data)
     {
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）
+        if (!CoopConfig.RecordPlayerSync) return;
         try
         {
             var r = new NetDataReader(data);
@@ -109,6 +117,8 @@ public sealed class RecordPlayerSyncV2 : ISyncedModule
 
     public void OnLateJoin(ulong steamId)
     {
+        // 配置开关（docs/CONFIG.md `[Sync] RecordPlayerSync`）
+        if (!CoopConfig.RecordPlayerSync) return;
         // 主机：把当前状态单播给新加入成员（替代 V1 StateSnapshotSync "recordplayer"）
         if (Store.IsHost && steamId != 0)
         {

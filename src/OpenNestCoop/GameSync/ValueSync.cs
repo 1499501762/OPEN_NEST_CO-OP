@@ -256,7 +256,7 @@ public static class ValueSync
                     b.Applying = true;
                     try { SetValue(b, v); }
                     finally { b.Applying = false; }
-                    MarkHost(b);
+                    MarkHost(b, v);
                 }
             }
             if (net.IsHost)
@@ -377,7 +377,7 @@ public static class ValueSync
                 bool schanged = b.ForceNext || !b.HSet || Delta(cur, HostLastSafe(b)) >= b.Deadzone || edgeSc != edgeSl;
                 bool first = !b.HSet;
                 b.ForceNext = false;
-                MarkHost(b);
+                MarkHost(b, cur);
                 // 首次（!HSet）只记录不上行——开局不广播（避免误读值覆盖对端）；之后变化才广播
                 if (!first && schanged)
                 {
@@ -394,7 +394,7 @@ public static class ValueSync
             // 心跳补发从未发送过（!HSet）的绑定做初始对齐（新加入/重连）；非心跳变化才发
             bool changed = forced || !b.HSet || Delta(cur, last) >= b.Deadzone || edgeCur != edgeLast;
             if (!changed) continue;
-            MarkHost(b);
+            MarkHost(b, cur);
             SendState(net, b, cur, false); // reliable（低频最终值/状态变化）
         }
     }
@@ -459,7 +459,7 @@ public static class ValueSync
             b.ForceNext = false;
             bool changed = (forced || !b.HSet || Delta(cur, last) >= b.Deadzone || edgeCur != edgeLast || forced);
             if (!changed) continue;
-            MarkHost(b);
+            MarkHost(b, cur);
             SendState(net, b, cur, true); // 高频 → unreliable
         }
     }
@@ -576,10 +576,12 @@ public static class ValueSync
     private static float HostLastSafe(Binding b) => b.HSet ? HostLast(b) : float.NaN;
     private static float LocalLast(Binding b) => b.Kind switch { 0 => b.LF, 1 => b.LI, _ => b.LB ? 1f : 0f };
 
-    private static void MarkHost(Binding b)
+    /// <summary>记录主机最近值（b.HSet=true + 写 HF/HI/HB）。⚠️ 2026-08-31 帧性能：接受已读值 v 参数，
+    /// 不再内部重复 GetValue——HostSendVector/HostTickHighFreq 已 GetValue(cur)，原 MarkHost 内部再 GetValue
+    /// 一次 → 每绑定每轮 2 次 IL2CPP 读（71 绑定 × 2 = 142 次/轮），改传值后省一半。</summary>
+    private static void MarkHost(Binding b, float v)
     {
         b.HSet = true;
-        float v = GetValue(b);
         if (b.Kind == 0) b.HF = v;
         else if (b.Kind == 1) b.HI = (int)Mathf.Round(v);
         else b.HB = v >= 0.5f;

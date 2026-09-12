@@ -18,7 +18,15 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class MapMarkerSync : ISyncedModule
 {
-    public byte MsgType => 107;
+    public int MsgType => 107;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册；同时注册中途加入快照
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister()
+    {
+        CoopSyncRegistry.PendingRegister(false, () => new MapMarkerSync());
+        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("mapmarker", BuildMapMarkerSnapshot, ApplyMapMarkerSnapshot));
+    }
     private int _recvLog;
     private static bool _hooked;
     private static float _lastDragSend;

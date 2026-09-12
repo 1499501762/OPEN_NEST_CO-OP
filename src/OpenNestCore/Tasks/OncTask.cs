@@ -90,6 +90,24 @@ public enum OncNodeKind
     UnlockSceneObject,
     /// <summary>自定义动作（C# 回调，最灵活；JSON 里用 <see cref="CustomData"/> 交由宿主解释）。</summary>
     Custom,
+    /// <summary>
+    /// 脚本化模块（= 原生 State_CustomTrackingVariable 载体；"在原生的 Node 任务引擎上引入脚本化模块"）。
+    /// 按 <see cref="ModuleName"/> 分派到宿主注册的脚本模块（C# 回调）或解释 <see cref="ModuleArgs"/>
+    /// （JSON 字符串）。与 <see cref="Custom"/> 的区别：Scripted 是**命名分派 + JSON 友好 + 可映射到原生节点**，
+    /// Custom 是直接内联回调。
+    /// </summary>
+    Scripted,
+    /// <summary>
+    /// 脚本化条件（B1）：进节点时问脚本模块布尔结果（<see cref="OncScriptContext.BoolResult"/>），
+    /// true 走 <see cref="OncNode.To"/>[0]、false 走 To[1]（只有一个出边走 To[0]）。
+    /// 对应原生 State_ConditionBranch 的条件求值，但条件由脚本模块决定。
+    /// </summary>
+    ScriptedCondition,
+    /// <summary>
+    /// 脚本化挂起（B2）：像 WaitForEvent 一样留在激活表，每帧问脚本模块"好了没"
+    /// （<see cref="OncScriptContext.BoolResult"/> = true 即完成沿出边继续）。完成条件由脚本决定。
+    /// </summary>
+    ScriptedWait,
 }
 
 /// <summary>事件分流表项：当事件 <see cref="EventId"/> 触发时，走向 <see cref="TargetNodeId"/> 出边。</summary>
@@ -216,6 +234,13 @@ public sealed class OncNode
     /// <summary>自定义数据（Custom 节点：宿主解释的 JSON 字符串）。</summary>
     public string CustomData;
 
+    // ---- 脚本化模块（Scripted）----
+    /// <summary>脚本化模块名（Scripted 节点：分派到宿主注册的脚本模块；也用于原生 State_CustomTrackingVariable 载体）。</summary>
+    public string ModuleName;
+
+    /// <summary>脚本化模块参数（Scripted 节点：传给模块的 JSON 字符串）。</summary>
+    public string ModuleArgs;
+
     // ---- 脚本回调（C# 定义时用；JSON 导入不携带）----
     /// <summary>自定义动作回调（Custom，C# 脚本定义时）。</summary>
     [NonSerialized]
@@ -326,6 +351,18 @@ public sealed class OncNode
     /// <summary>自定义动作（C# 回调）。</summary>
     public static OncNode Custom(Action<OncMissionContext> action) => new OncNode { Kind = OncNodeKind.Custom, Action = action };
 
+    /// <summary>脚本化模块：按名分派到宿主注册的脚本模块（C# 回调 / JSON 解释），参数为 JSON 字符串。</summary>
+    public static OncNode Scripted(string moduleName, string args = null)
+        => new OncNode { Kind = OncNodeKind.Scripted, ModuleName = moduleName, ModuleArgs = args };
+
+    /// <summary>脚本化条件：进节点问脚本模块布尔结果，true 走 To[0]、false 走 To[1]（只有一个出边走 To[0]）。</summary>
+    public static OncNode ScriptedCondition(string moduleName, string args = null)
+        => new OncNode { Kind = OncNodeKind.ScriptedCondition, ModuleName = moduleName, ModuleArgs = args };
+
+    /// <summary>脚本化挂起：留在激活表，每帧问脚本模块 BoolResult，true 才沿出边继续。</summary>
+    public static OncNode ScriptedWait(string moduleName, string args = null)
+        => new OncNode { Kind = OncNodeKind.ScriptedWait, ModuleName = moduleName, ModuleArgs = args };
+
     // ================= 链式配置 =================
 
     /// <summary>指定节点 id（便于 Goto/连线）。</summary>
@@ -427,6 +464,10 @@ public sealed class OncMission
     /// <summary>解锁条件表达式/事件（预留，字符串；宿主解释）。</summary>
     public string UnlockCondition;
 
+    /// <summary>完成/失败时是否走原生 MissionManager 结算（D 方案，可选；默认 false = 只发通知 + 解锁）。
+    /// 原生格式任务（csm_native）本身已走原生结算，无需此字段；Core 引擎任务想记原生结算时置 true。</summary>
+    public bool NativeComplete;
+
     /// <summary>选任务面板卡片配置（可选；位置/尺寸/颜色，见 <see cref="OncMissionCard"/>）。</summary>
     public OncMissionCard Card;
 
@@ -483,8 +524,9 @@ public sealed class OncOperation
 /// <summary>
 /// 任务运行上下文（传给 <see cref="OncNodeKind.Custom"/> 动作；也可被宿主使用）。
 /// 提供任务变量（≈ StateGraph.Variables）、运行时引用、宿主引用。
+/// 派生：<see cref="OncScriptContext"/>（脚本化模块上下文）。
 /// </summary>
-public sealed class OncMissionContext
+public class OncMissionContext
 {
     public OncMission Mission;
     public OncMissionRuntime Runtime;
@@ -495,4 +537,79 @@ public sealed class OncMissionContext
 
     /// <summary>触发任务事件（驱动 WaitFor/Branch 节点）。</summary>
     public void Raise(string eventId, object payload = null) => Runtime?.Raise(eventId, payload);
+}
+
+/// <summary>
+/// 脚本化模块执行上下文（<see cref="OncNodeKind.Scripted"/> 节点 → 宿主 <see cref="IOncMissionHost.RunScriptedModule"/>）。
+/// 除了 <see cref="OncMissionContext"/> 的能力，还提供脚本模块名与参数（JSON 字符串）。
+/// 原生载体（State_CustomTrackingVariable）触发时：<see cref="Mission"/> 为 null、<see cref="Runtime"/> 为 null，
+/// <see cref="Variables"/> 为原生图变量（可为 null）——脚本模块靠 <see cref="Args"/> + <see cref="Host"/> 工作。
+/// 事件钩子触发时（事件订阅 B 方案）：<see cref="Event"/> 非 null（携带 EventId + Payload）。
+/// </summary>
+public sealed class OncScriptContext : OncMissionContext
+{
+    /// <summary>脚本模块名（分派键）。</summary>
+    public string ModuleName;
+
+    /// <summary>脚本模块参数（JSON 字符串；可为 null）。</summary>
+    public string Args;
+
+    /// <summary>触发本次执行的游戏事件（事件订阅钩子触发时非 null；节点触发时为 null）。</summary>
+    public OncScriptEvent Event;
+
+    /// <summary>脚本条件/挂起的结果（B1 ScriptedCondition / B2 ScriptedWait：模块执行后由宿主读）。</summary>
+    public bool BoolResult;
+
+    /// <summary>主机权威广播脚本事件给全员（A4 联机）：主机端本地触发 + 广播，客机收到后本地触发。
+    /// 游戏事件驱动时用 <see cref="Raise"/>（两端本地自然触发即可）；自定义/主机逻辑事件用 Broadcast 跨端。</summary>
+    public void Broadcast(string eventId, object payload = null) => Host?.BroadcastScriptEvent(eventId, payload);
+}
+
+/// <summary>脚本模块事件载荷（事件钩子触发脚本模块时提供：哪个事件 + 载荷）。</summary>
+public sealed class OncScriptEvent
+{
+    /// <summary>事件 id（如 "mission.completed" / "shell.landed" / "entity.destroyed.&lt;id&gt;" / "interact.click"）。</summary>
+    public string EventId;
+
+    /// <summary>事件载荷（着弹位置 Vector2 / 实体 id / 交互对象路径等）。</summary>
+    public object Payload;
+
+    /// <summary>载荷按类型取（B4 类型化访问；类型不匹配返回 default）。</summary>
+    public T PayloadAs<T>() => Payload is T t ? t : default;
+
+    /// <summary>载荷转字符串。</summary>
+    public string AsString() => Payload?.ToString();
+
+    /// <summary>载荷转 int。</summary>
+    public int AsInt()
+    {
+        try
+        {
+            if (Payload is int i) return i;
+            return Payload == null ? 0 : (int)System.Convert.ToInt64(Payload);
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>载荷转 float。</summary>
+    public float AsFloat()
+    {
+        try
+        {
+            if (Payload is float f) return f;
+            return Payload == null ? 0f : System.Convert.ToSingle(Payload);
+        }
+        catch { return 0f; }
+    }
+
+    /// <summary>载荷转 bool。</summary>
+    public bool AsBool()
+    {
+        try
+        {
+            if (Payload is bool b) return b;
+            return Payload != null && System.Convert.ToBoolean(Payload);
+        }
+        catch { return false; }
+    }
 }

@@ -12,6 +12,10 @@ namespace OpenNestCoop.SyncV2;
 /// </summary>
 public static class RequisitionSyncV2
 {
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Register());
+
     private static bool _registered;
     private static PowderChargeInventory _powderInv;
     private static int _powderSeenLog;

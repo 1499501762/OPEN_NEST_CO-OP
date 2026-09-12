@@ -32,7 +32,11 @@ public sealed class CatSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Cat;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Cat;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     /// <summary>交互事件 id（EventLayer 通道）。</summary>
     public const string CatEventId = "v2/cat/event";
@@ -68,6 +72,8 @@ public sealed class CatSyncV2 : ISyncedModule
     public void Tick(float dt)
     {
         if (!Store.IsOnline) return;
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 猫同步整体静默（不广播/不上行/不应用）
+        if (!CoopConfig.CatSync) return;
         _timer += dt;
         if (_timer < Interval) return;
         _timer = 0f;
@@ -223,6 +229,8 @@ public sealed class CatSyncV2 : ISyncedModule
 
     public void OnPacket(ulong from, byte[] data)
     {
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 不接收/不应用猫同步包
+        if (!CoopConfig.CatSync) return;
         try
         {
             var r = new NetDataReader(data);
@@ -370,6 +378,8 @@ public sealed class CatSyncV2 : ISyncedModule
     public void OnLocalCatEvent(CatController cat, byte ev)
     {
         if (IsApplyingCat || cat == null || !Store.IsOnline) return; // 应用远端事件时不重复上报（防环）
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 不上报猫交互事件
+        if (!CoopConfig.CatSync) return;
         int idx = IndexOf(cat);
         if (idx < 0) return;
         try
@@ -390,6 +400,8 @@ public sealed class CatSyncV2 : ISyncedModule
     /// <summary>EventLayer 复现：对端执行相同交互（IsApplyingCat 防环）。</summary>
     private static void ReproduceCatEvent(NetDataReader r)
     {
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 不应用猫交互事件
+        if (!CoopConfig.CatSync) return;
         try
         {
             int idx = r.GetByte();

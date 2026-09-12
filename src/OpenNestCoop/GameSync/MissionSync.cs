@@ -18,7 +18,15 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class MissionSync : ISyncedModule
 {
-    public byte MsgType => 102;
+    public int MsgType => 102;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册；同时注册中途加入快照
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister()
+    {
+        CoopSyncRegistry.PendingRegister(false, () => new MissionSync());
+        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("mission", BuildMissionSnapshot, ApplyMissionSnapshot));
+    }
 
     private const float Interval = 0.5f;
     private float _timer;
@@ -34,6 +42,8 @@ public sealed class MissionSync : ISyncedModule
     private int _lastRosterCount;
     private float _sceneKeepalive;
     private string _lastAppliedScene = "";
+    /// <summary>已跟随过的非任务相位（0=主菜单 / 1=选任务）——防重复调用 LoadMainMenu/EnterBrowsingMap。</summary>
+    private byte _lastMenuPhase = 255;
     private string _hNodeId = ""; // 主机任务图当前节点（同步序号，诊断/进度显示用）
     private int _pendingSeed = -1;   // 待应用到 FireMission 的种子（场景加载后重试直到生效）
     /// <summary>主机记住的已生成种子（GetSeed 读不到 FireMission.seed 时的稳定回退——
@@ -121,10 +131,11 @@ public sealed class MissionSync : ISyncedModule
             {
                 if (net.IsHost)
                 {
-                    // ⚠️ 自定义任务（@c: 前缀）：主机以 CurrentMission 真实图为准（GetMissionId 已从图读），
-                    // 不覆盖 CurrentMissionSceneName——避免缓存污染（自定义任务 scene 名可能与原生任务同名）。
-                    if (!IsCustomTag(scene))
-                        m.CurrentMissionSceneName = scene;
+                    // ⚠️ 2026-08-26 修复：主机收到客机上行**不覆盖 CurrentMissionSceneName**。
+                    // 原实现用客机上报的 scene 覆盖 m.CurrentMissionSceneName → 污染主机状态 →
+                    // 之后主机 ReturnToMap → UnloadCurrentMissionSceneIfAny 用无效场景名卸载
+                    // → "Scene to unload is invalid"（中途退任务报错根因）。主机以自己本地状态为准，
+                    // 客机上行只用于广播转发（EnqueueBatch 转发给其他客机）。
                 }
                 else
                 {
@@ -157,8 +168,33 @@ public sealed class MissionSync : ISyncedModule
                     }
                     else
                     {
-                        // 主菜单/选任务界面：跟随主机 GamePhase（标准枚举可 cast）
-                        try { m.SetPhase((MissionManager.GamePhase)phase); } catch { }
+                        // ⚠️ 2026-09-12：主机回主菜单/选任务界面时，客机要**真正切界面**——只 `SetPhase`
+                        // 只改内部相位字段，不会卸载当前任务场景（用户：“主机返回主菜单客机不同步”）。
+                        // GamePhase：MainMenu=0 / BrowsingMap=1 / MissionActive=2。
+                        if (_lastMenuPhase != phase)
+                        {
+                            try
+                            {
+                                if (phase == 0)
+                                {
+                                    m.LoadMainMenu();
+                                    _lastMenuPhase = phase; _lastAppliedScene = "";
+                                    CoopRuntime.LogSource?.LogInfo("[MissionSync] client follow host → LoadMainMenu (host phase=0)");
+                                }
+                                else if (phase == 1)
+                                {
+                                    m.EnterBrowsingMap();
+                                    _lastMenuPhase = phase; _lastAppliedScene = "";
+                                    CoopRuntime.LogSource?.LogInfo("[MissionSync] client follow host → EnterBrowsingMap (host phase=1)");
+                                }
+                                else
+                                {
+                                    m.SetPhase((MissionManager.GamePhase)phase);
+                                    _lastMenuPhase = phase;
+                                }
+                            }
+                            catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[MissionSync] follow phase={phase}: {ex.Message}"); }
+                        }
                     }
                 }
             }

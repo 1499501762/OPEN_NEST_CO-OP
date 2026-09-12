@@ -1,0 +1,16 @@
+{
+  "Id": "selftest.06.scriptflow",
+  "DisplayName": "自检6 脚本条件/挂起",
+  "Description": "覆盖：ScriptedWait(挂起直到模块 BoolResult=true) / ScriptedCondition(布尔结果走 To[0]/To[1])。⚠️ 需注册 selftest_wait/selftest_cond 模块（README 提供 C# 片段）；未注册时按默认 true 处理（挂起立即过/走 To[0]），也能 End。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "[自检6] 开始：等 selftest_wait 挂起结束", "To": ["w1"] },
+    { "Id": "w1", "Kind": "ScriptedWait", "ModuleName": "selftest_wait", "To": ["c1"] },
+    { "Id": "c1", "Kind": "ScriptedCondition", "ModuleName": "selftest_cond", "To": ["win", "lose"] },
+    { "Id": "win", "Kind": "Print", "Message": "[自检6] 条件→To[0] 成功（挂起+条件 OK）", "To": ["n3"] },
+    { "Id": "n3", "Kind": "End" },
+    { "Id": "lose", "Kind": "Fail" }
+  ]
+}

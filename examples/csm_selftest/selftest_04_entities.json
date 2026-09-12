@@ -1,0 +1,18 @@
+{
+  "Id": "selftest.04.entities",
+  "DisplayName": "自检4 地图实体",
+  "Description": "覆盖：SpawnEntity / MoveEntity / SetEntityState / Impact / DamageEntity(致死) / WaitEntityDestroyed / End。自生成敌人→移动→设状态→着弹→伤害→等待摧毁，全自动通过。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["s1"] },
+    { "Id": "s1", "Kind": "SpawnEntity", "EntityId": "stEnemyA", "EntityName": "自检敌人", "X": 8, "Y": 5, "Health": 5, "Armour": 0, "Role": "Target", "To": ["m1"] },
+    { "Id": "m1", "Kind": "MoveEntity", "EntityId": "stEnemyA", "X": 10, "Y": 5, "Smooth": true, "Seconds": 1, "To": ["se1"] },
+    { "Id": "se1", "Kind": "SetEntityState", "EntityId": "stEnemyA", "Role": "Damaged", "Value": 1, "To": ["im1"] },
+    { "Id": "im1", "Kind": "Impact", "X": 10, "Y": 5, "To": ["d1"] },
+    { "Id": "d1", "Kind": "DamageEntity", "EntityId": "stEnemyA", "Value": 5, "To": ["w1"] },
+    { "Id": "w1", "Kind": "WaitEntityDestroyed", "EntityId": "stEnemyA", "To": ["p1"] },
+    { "Id": "p1", "Kind": "Print", "Message": "[自检4] 实体 生成/移动/状态/着弹/伤害/摧毁 OK", "To": ["n2"] },
+    { "Id": "n2", "Kind": "End" }
+  ]
+}

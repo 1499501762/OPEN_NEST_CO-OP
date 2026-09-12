@@ -1,0 +1,13 @@
+{
+  "Id": "selftest.08.b",
+  "DisplayName": "自检8B 后置任务",
+  "Description": "前置/后置：Requires=[selftest.08.a]，完成 A 后本任务才可启动。若未完成 A 启动会被拒绝（IsMissionUnlocked 检查）。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Requires": ["selftest.08.a"],
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "[自检8B] 前置已解锁（Requires 生效）", "To": ["n3"] },
+    { "Id": "n3", "Kind": "End" }
+  ]
+}

@@ -11,6 +11,10 @@ namespace OpenNestCoop.SyncV2;
 /// </summary>
 public sealed class NotificationSyncV2
 {
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案，纯事件层，实例化即向 EventLayer 注册），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => { _ = Instance; });
+
     public static NotificationSyncV2 Instance { get; } = new NotificationSyncV2();
 
     private NotificationSyncV2()

@@ -1,0 +1,12 @@
+{
+  "Id": "selftest.08.a",
+  "DisplayName": "自检8A 前置任务",
+  "Description": "前置/后置：先完成 A，再启动 B（Requires 生效才解锁）。A 无前置，自动完成。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "[自检8A] 前置任务完成，B 已解锁", "To": ["n3"] },
+    { "Id": "n3", "Kind": "End" }
+  ]
+}

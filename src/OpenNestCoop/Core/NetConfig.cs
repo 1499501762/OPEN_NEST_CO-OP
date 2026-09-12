@@ -4,7 +4,7 @@ public static class NetConfig
 {
     public const string Guid = "dev.open-nest.coop";
     public const string Name = "Open Nest Co-op";
-    public const string Version = "0.2.0";
+    public const string Version = "0.2.0-Alpha";
 
     public const int DefaultMaxPlayers = 4;
     public const int P2PChannel = 0;
@@ -29,8 +29,9 @@ public static class NetConfig
         "BepInEx";
 #endif
 
-    /// <summary>握手协议版本（Hello/Welcome 结构版本，2 = 含版本号+密码字段）。旧客户端无此字段 → 拒绝。</summary>
-    public const byte HandshakeVersion = 2;
+    /// <summary>握手协议版本（Hello/Welcome 结构版本；2 = 含版本号+密码字段；3 = 追加注册通道表；
+    /// 4 = 追加前导字节宽度沟通（HeaderWidth 1/2，1 字节用尽自动扩展为 2 字节））。旧客户端无此字段 → 拒绝。</summary>
+    public const byte HandshakeVersion = 4;
 
     public const float PingInterval = 3f;
     public const int MaxChatLines = 80;

@@ -1,0 +1,16 @@
+{
+  "Id": "tutorial.03.branch",
+  "DisplayName": "教程3 事件分支",
+  "Description": "事件桥接 A 方案：Branch 等游戏事件 shell.landed（炮弹着弹）→ 命中走 hit 成功线；120 秒超时 → 走 lose 失败线。任务需在能开炮的场景测试。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "教程3：开一炮，等 shell.landed 事件；120 秒没着弹则失败。", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Branch", "EventId": "shell.landed", "Timeout": 120,
+      "Routes": [ { "EventId": "shell.landed", "TargetNodeId": "hit" } ], "To": ["lose"] },
+    { "Id": "hit", "Kind": "Print", "Message": "炮弹着弹，任务成功！", "To": ["win"] },
+    { "Id": "win", "Kind": "End" },
+    { "Id": "lose", "Kind": "Fail" }
+  ]
+}

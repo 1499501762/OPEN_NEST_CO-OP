@@ -73,7 +73,15 @@ public static class OncMissionCardInjector
                         return false;
                     }
                     var m = OncMissionBridge.FindMission(id);
-                    if (m != null) OncMissionImporter.ImportAndLog(m); // OncMission 格式 → 转原生验证
+                    if (m != null)
+                    {
+                        // ⚠️ 2026-08-30 修复：Core 格式（Kind 字段）任务点击卡片必须**真正启动 Core 引擎**，
+                        // 之前只 ImportAndLog（转原生验证+日志）就 return false，导致"进不去任务"
+                        // （原生 ActivateMission 被拦 + Core 引擎没启动）。现在走 OncMissionBridge.Start：
+                        // 检查前置后置 → LoadMissionScene（场景） → runtime.Start() → HUD。
+                        if (!OncMissionBridge.Start(m))
+                            CoopRuntime.LogSource?.LogWarning($"[OncCard] start '{id}' failed (locked or scene load error)");
+                    }
                     else CoopRuntime.LogSource?.LogWarning($"[OncCard] no mission '{id}'");
                 }
                 catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[OncCard] activate '{id}': {ex.Message}"); }

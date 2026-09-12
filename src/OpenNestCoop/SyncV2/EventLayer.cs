@@ -31,7 +31,11 @@ public sealed class EventLayer : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Event;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Event;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     private const string FireEventId = "v2/fire";            // 主机 → 全员：开火复现
     private const string FireRequestEventId = "v2/fire/req"; // 客机 → 主机：开火请求（主机执行）
@@ -169,7 +173,11 @@ public sealed class EventLayer : ISyncedModule
             var turret = TurretController.Instance;
             if (turret == null || turret.guns == null || gun == null) return -1;
             for (int i = 0; i < turret.guns.Count; i++)
-                if (turret.guns[i] == gun) return i;
+            {
+                var g = turret.guns[i];
+                // ⚠️ IL2CPP interop：包装引用 == 不可靠，按底层 Pointer 匹配（与 ReloadSync.IndexOf 一致）。
+                if (g != null && g.Pointer == gun.Pointer) return i;
+            }
         }
         catch { }
         return -1;

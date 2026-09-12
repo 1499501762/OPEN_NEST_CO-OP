@@ -1,0 +1,19 @@
+{
+  "Id": "tutorial.02.objective",
+  "DisplayName": "教程2 目标与计时器",
+  "Description": "目标进度（Objective Start → Complete）+ 计时器（StartTimer → WaitTimerExpired 等 10 秒）。目标列表在任务 HUD 显示进度。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Objectives": [
+    { "Id": "survive", "Title": "坚持 10 秒", "Type": "survive", "Target": 10 }
+  ],
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Objective", "ObjectiveId": "survive", "ObjectiveAction": "Start", "To": ["n3"] },
+    { "Id": "n3", "Kind": "StartTimer", "TimerId": "t1", "Seconds": 10, "To": ["n4"] },
+    { "Id": "n4", "Kind": "WaitTimerExpired", "TimerId": "t1", "To": ["n5"] },
+    { "Id": "n5", "Kind": "ObjectiveComplete", "ObjectiveId": "survive", "To": ["n6"] },
+    { "Id": "n6", "Kind": "Print", "Message": "教程2：目标完成，任务结束。", "To": ["n7"] },
+    { "Id": "n7", "Kind": "End" }
+  ]
+}

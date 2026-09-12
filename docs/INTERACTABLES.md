@@ -9,6 +9,21 @@
 > 同步归属来自 `src/OpenNestCoop/GameSync/*.cs` 当前实现（V1 活代码）。
 >
 > **更新记录**：
+>
+> - 2026-09-12（三）新增 §六 **炮术计算台按钮**：`Artillery Computer Console/Calculate Universal Button`
+>   （用户 F10 实测：组件 `Transform/Animator/LookAtTarget/BoxCollider/AnimatorBoolToggler x4`；此前**无任何同步**）。
+>   归 `ButtonClickSync`（点击复现 + 多 toggler 轮询），由配置文件开关 `[Interactables] CalculateButtonSync` 控制，**默认 false**
+>   → 见 `docs/CONFIG.md`（新增模组配置文件：猫同步/唱片机同步开关 + 本项）。
+>
+> - 2026-09-12（二）新增一条**根因已定位并改为源头修正**的问题：**客机落点与主机不一致**——
+>   实测两端飞行时长/射程差均 ~4%，根因是客机复现开火用的是**自己那一刻的本地物理状态**（炮塔角/仰角）；
+>   新增 `ShotSync`（动态通道 `shotparams`）主机权威下发**炮弹发射参数**。详见 `docs/IMPACT_ASSESSMENT.md`。
+>
+> - 2026-09-12 新增两条已修问题：**照片“拍摄角度/方向”不同步**（地图上的照片角度由游戏 `RandomUIRotation.Awake`
+>   两端各自随机 roll → `ImpactSync` 改为由已同步着弹点算出的确定性角度，详见 `docs/IMPACT_ASSESSMENT.md`）；
+>   **开局打字机偶发不同步**（`Apply` 在打字机未注册时丢弃事件 + 主机 `EvState` 只在变化时广播 → 永久不同步；
+>   改为暂存原始包 + `Tick` 重试，详见 `docs/TELEPRINTER_MISSION.md`）。
+>
 > - 2026-08-26 修复"开局状态不正常"（Locking Lever Rotation/Elevation 乱转 + 引擎停电）：①`Aiming Console/` 下 Locking Lever 视觉角度由 `transform.localEulerAngles` 表示（accumulatedValue 恒 0 非视觉值）——ControlSync 值源改读 `localEulerAngles.y`、set 直接设旋转（对端 Lever 角度一致）；②`env/engine/running` 加 SkipFull 排除 ControlFull 全量广播（只走状态变化广播，避免主机开局 getter 误读 false 覆盖客机关引擎）。
 > - 2026-08-22 建表
 > - 2026-08-22 加入 F9/F10 实测路径；修订：不存在方向角锁止拉杆；仰角锁止 = `Wheel Blocker`/`Handle Blocker`（Interactable 非 LookAtTarget）；
@@ -131,6 +146,12 @@
 | `universal button` | `War Horn Parent/War Horn/universal button` | 汽笛按钮 | ButtonClickSync（关键词 `Horn`/`Siren`） | 2026-08-22 新增 |
 | `universal button` | `War Horn Parent (1)/War Horn/universal button` | 汽笛按钮 | ButtonClickSync | 2026-08-22 新增 |
 
+### 炮术计算台（Artillery Computer Console，2026-09-12 实测）
+
+| 实体名 | 实测路径（F10） | 类型（组件） | 功能 | 同步模块 | 备注 |
+|---|---|---|---|---|---|
+| `Calculate Universal Button` | `Artillery Computer Console/Calculate Universal Button` | LookAtTarget + **4×AnimatorBoolToggler** + Animator + BoxCollider + Transform | 炮术计算台“计算”按钮（与普通 Universal Button 同构） | **ButtonClickSync**（点击复现 118 + 多 toggler 状态轮询 135） | ⚠️ **2026-09-12 新增同步，默认关**：开关 = 配置文件 `[Interactables] CalculateButtonSync`（`docs/CONFIG.md`）——此前路径不含任何关键词 → 完全不跟踪。开启后需**双端都 true** |
+
 ### 其他
 
 | 实体名 | 功能 | 同步模块 | 备注 |
@@ -174,6 +195,12 @@ Trajectory
 - `Load shell Rammer` / `Move Cylinder`（推弹头/切弹舱走 CylinderActionSync 事件解耦）
 - `Button Dispencer` / `Charge Rammer`（选药量/投放发射药走 ReloadSync PowderEvent 事件解耦；2026-08-23 修，原来被 `Dispenc`/`Rammer` 关键词误命中 → 双路径冲突）
 
+**关键词之外的名字级显式纳入**（不经关键词表，直接按名字判定，**由配置开关控制**）：
+- `Calculate Universal Button`（炮术计算台计算按钮）→ `return CoopConfig.CalculateButtonSync;`（**默认 false**，见 `docs/CONFIG.md`）
+
+> F10 交互工具现在会在屏幕底部多显示一行 `同步(点击复现): 开/关` + `[CoopConfig 键=值 ...]`——
+> 对着实体看这行就能判断“到底有没有被跟踪”（含配置开关判定），不用猜。
+
 **ControlSync 不注册**（显示/从动型，非玩家输入）：
 - Range/Bearing Dial、Split flap display（坐标计算器显示）
 - Starter Chain/Trigger Chain（链条机械动画显示）
@@ -195,8 +222,16 @@ Trajectory
 | 补给台拉杆卡激活（2026-08-23） | `Requisition Console/Universal Button`（多 toggler 拉杆） | ⚠️ 用户澄清：**与目标弹舱拨杆（.Charge Dial）无关**，非冲突。原分析（动画中切拨杆）错误；后测**未复现** | ✅ 未复现，暂关闭 |
 | `.Charge Dial` 双向同步（2026-08-23） | `Requisition Console/.../.Charge Dial` | 用户反馈：当前**双向同步正常**（两端 Requisition 拨杆 av 0→1 一致）；但提示**可能是偶发**（预计延迟容忍性问题）——本轮未改 .Charge Dial 逻辑，若再出现客机拨动不上行，需加延迟容忍/心跳处理 | ✅ 当前正常，偶发待观察 |
 | 只打两发但着弹/侦察照片多触发（2026-08-23） | 着弹（ImpactTracker/ShellVisual）/ 侦察照片 | 用户反馈：拉 `.Trigger chain parent` 开火 2 发，但"着弹好像多触发"+"似乎侦察照片多触发"。**实测结论（ImpactDiag+堆栈）**：开火/炮弹层正常（2 发 = Initialize 2 次）；着弹评估由 `ImpactLocation::EvaluateAndReport` 驱动（每发 1 次，堆栈确认）；**偶发**——一次复现 EvaluateImpact 3 次（第 3 次 5 秒后、位置不同 = 多余一次），另一次只 2 次（无多）。侦察照片入口 `RegisterChild`（ReconPhotoSync）两次均未触发——用户看到的"照片"更可能是战术地图落点标记（ImpactMarkerManager）。详见 `docs/IMPACT_ASSESSMENT.md` | 🔄 偶发，已建 IMPACT_ASSESSMENT.md + ImpactDiag 堆栈诊断，待继续观察 |
-| 怀表时间不同步 | GunStopwatch / GenericTimerSceneSync | 无同步模块，纯本地计算 | 🔄 待 F9 确认怀表实际组件 |
-| 仰角锁止（Wheel/Handle Blocker）未确认同步 | Wheel/Handle Blocker（Interactable） | 非 LookAtTarget，不走点击同步，需确认用 Interactable 事件 | 🔄 2026-08-22 新发现 |
+| 照片"拍摄角度/方向"不同步（2026-09-12） | 着弹照片（`ImpactLocation_*(Clone)/Parent` 的 `RandomUIRotation`） | 双端实测：角度由游戏 `RandomUIRotation.Awake` **本地随机 roll**（`UnityEngine.Random`，`min=5 max=85 axis=Z`；HOST 43.9° / CLIENT 77.9°）。**方案（用户方向）**：全局随机**同步种子**——两端用同一权威落点派生种子在 Awake 前 `InitState` → 游戏自己 roll 出同值（不传角度/不覆盖/无闪烁）。详见 `docs/IMPACT_ASSESSMENT.md` | ✅ 已改，待复测 |
+| 客机落点与主机不一致（2026-09-12 根因） | 炮弹弹道（`ShellVisual`）/ 着弹评估 | 用户质疑：“开火参数明明都是一致的，客机落点怎么会不一致，一直是同一个根源问题，治标不治本”。实测：HOST 落点(18.18,5.43) 飞行25.62s vs CLIENT 落点(18.88,5.73) 飞行26.84s（时长/射程差均~4%）→ **根因 = 客机是收到 GunFire 后用自己的本地物理状态（炮塔角/仰角）重算一发**，模组只同步了期望/控件值。**修法**：新增 `ShotSync`（动态通道 `shotparams`）主机权威下发这发炮弹的发射参数，客机套用到本地同发炮弹（治本）。详见 `docs/IMPACT_ASSESSMENT.md` | 🔄 已改源头，待复测 |
+| 锁止组件出现/消失未同步（2026-09-12） | `Turret/Elevation Console/.Elevation Lever Baseplate/.Loading Cover {Left,Right}/Handle Blocker` | `BlockerSync`（动态通道 `blocker`）已实现（主机 0.5s 轮询 activeSelf 变化广播、客机 SetActive），实测主机 `host broadcast n=2` 但**客机无任何 recv** → 单次变化事件丢了（客机当时未注册/对象未找到/被本地逻辑覆盖）就永久不同步。**修法**：加 **3s 心跳补发**（无变化时幂等重发全部当前状态）+ 日志路由到 sync.log | 🔄 已加心跳，待复测 |
+| 丢一发炮弹（2026-09-12 已查清） | 炮弹（`ShellVisual`）/ `GunController.ChamberedShellBlueprint` | 用户怀疑“模组拦截短时间多发炮弹落地”。实测：**模组没拦截**——客机 3 次 `OnGunFire`/`RequestFire` 都执行了，第三发（GunRight）`chambered=N`（膛内无弹）→ `FireShell` 不触发 → 客机少一发。修法：`ShotSync` 兜底——主机参数 1.2s 未配到本地炮弹 → 按 `ShellId` 解析 `ShellDefinition` + `shellVisualPrefab` 直接 `Instantiate` + `Initialize(主机参数)`。详见 `docs/IMPACT_ASSESSMENT.md` | 🔄 已加兜底，待复测 |
+| 打字机右侧一直空白（2026-09-12 已修判据） | `[Teleprinters]/Printers`（ptype） | 上一版“本地动画期间不写状态”的判据用 `IsPrinting`——实测**本机协程已死但 `IsPrinting` 仍 true** → 永远不写 → 一直空白。新判据 = “**本机揭示数是否真的在前进**”：前进 → 不干预（平滑本地动画）；不前进 → 由主机状态驱动（每个状态包写一次文本/揭示数/遮罩/纸张），即“跟随主机逐字显示”。另：换新文本时揭示数从 0 重新跟随。详见 `docs/TELEPRINTER_MISSION.md` | 🔄 已改，待复测 |
+| 打字机右侧空白/无动画 + 后续任务错乱（2026-09-12 已定位） | `[Teleprinters]/Printers`（ptype） | 双端日志：主机右侧**正常打印完**（revealed=463）；客机 `applied print ptype=1` 后 `isPrinting=True revealed=0`（**启动了但一字符未揭示**）→ 随后任务静默结束 → 被强制同步到 `revealed=463`。根因：**每 0.1s 覆写内部字段与本地协程打架**。详见 `docs/TELEPRINTER_MISSION.md` | 🔄 已改，待复测 |
+| 客机漏开火（2026-09-12 根因=膛内无弹） | 炮弹（`ShellVisual`）/ 着弹评估 | 主机 4 次 FireShell / 客机只 2 次。实测客机 `RequestFire chambered=N`（膛内无弹）→ `FireShell` 不触发 → 该发在客机侧没炮弹/没落点/没照片。**用户确认：由外部测试模组（买弹药没同步）导致，非本模组问题** | ✅ 非本模组问题，不管 |
+| 追踪器异常不同步（2026-09-12 ✅ 已不再需要单独同步） | `Map Table_ Shell Trajectory display` / `TrajectoryTarget` | 根因是**弹道起点不同**（铁巢地图图标 `TurretLocation` 未同步，已由 `NestSync` 修）→ 两端弹道一致后追踪器自然一致。用户确认不再需要单独同步：`ImpactSync` 已移除每次着弹写 `TrajectoryTarget.defaultLocalPosition`，只保留**中途加入**的强制对齐（协议加 `force` 字节，主机 `OnLateJoin` 单播最近着弹）。 | ✅ 已改为仅中途加入强制对齐 |
+| 开局打字机偶发不同步（2026-09-12） | `[Teleprinters]/Printers`（Teleprinter） | ①`Apply` 在打字机未注册时丢弃事件（已改暂存+`Tick` 重试）；②**实测真正主因**：客机自己的 `IsPrinting` 长期为真（主机 `isPrinting=False` 而客机持续 `printing=True` 2 分钟）→ `keepLocalAnimation=true` 永远跳过主机最终态（revealed/遮罩/纸张）→ 揭示进度与纸张位置不同步；已加"揭示数 2s 未前进→强制最终态"。详见 `docs/TELEPRINTER_MISSION.md` | ✅ 已改，待复测 |
+| 怀表时间不同步 | GunStopwatch / GenericTimerSceneSync | 无同步模块，纯本地计算 | 🔄 待 F9 确认怀表实际组件 || 仰角锁止（Wheel/Handle Blocker）未确认同步 | Wheel/Handle Blocker（Interactable） | 非 LookAtTarget，不走点击同步，需确认用 Interactable 事件 | 🔄 2026-08-22 新发现 |
 | 引擎扳手轮 `.Dial core` 同步归属待确认 | .Dial core（DialInteractable） | 可能已有命中，需确认走哪个同步 | 🔄 2026-08-22 新发现 |
 | Starter Chain 事件待查 | .Starter chain parent.001 | 与 Trigger Chain 相同非必须同步，但需找引擎启动/重启事件 | 🔄 2026-08-22 新发现 |
 
@@ -206,6 +241,17 @@ Trajectory
 
 | 版本 | 状态 | 说明 |
 |---|---|---|
+| **2026-09-12k（未发版）** | 🔄 待复测 | ①**新增模组配置文件**（标准 INI，`BepInEx/config/OpenNestCoop.cfg` / `UserData/OpenNestCoop.cfg`，2s 热重载）——设置项：`CatSync`（猫同步开关，默认开）、`RecordPlayerSync`（唱片机同步开关，默认开）、`CalculateButtonSync`（默认**关**）。见 `docs/CONFIG.md`；②**新交互同步**：`Artillery Computer Console/Calculate Universal Button`（F10 实测：LookAtTarget + 4 toggler）纳入 `ButtonClickSync`（默认关）；③**关键包保护表加注册函数**：`NetManager.RegisterCriticalType(s)` + `IsCriticalRegistered`（动态 Critical/High 优先级模块自动登记）；④F10 交互工具显示“同步(点击复现)开/关” + 当前配置值 |
+| **2026-09-12j（未发版）** | 🔄 待复测 | ①**关键包保护扩展**：动态通道模块（优先级 Critical/High，如 `shotparams`/`blocker`/铁巢图标）不再被合包上限丢弃（旧实现只保护硬编码类型且仅 <256）；②**主机返回主菜单客机跟随**：`MissionSync` 客户端在 phase=0 调 `LoadMainMenu()`、phase=1 调 `EnterBrowsingMap()`（旧实现只 `SetPhase` 不切界面）；③打字机已修好（用户确认） |
+| **2026-09-12i（未发版）** | 🔄 待复测 | 打字机：“动画期间不写状态”的判据由 `IsPrinting` 改为“**本机揭示数是否真的在前进**”（协程已死但 IsPrinting 仍 true → 旧判据导致一直空白）；不前进时由主机状态驱动跟随显示（并修正换新文本时揭示数复位） |
+| **2026-09-12h（未发版）** | 🔄 待复测 | 打字机：“本地打印任务一开始就死”根因 = **我们每 0.1s 覆写内部字段与本地协程打架** → 修：动画期间一律不写状态 + 卡死时用主机文本重起动画打印 + EvPrint 提交前清坏任务 + `job.lines` 无条件覆盖。另（上一版）：丢发兜底（`ShotSync` 用主机参数直接生成炮弹） |
+| **2026-09-12g（未发版）** | 🔄 待复测 | ①**丢发兜底**：实测模组未拦截，是客机膛内无弹（`chambered=N`）→ `ShotSync` 用主机参数直接 `Instantiate` 炮弹复现；②**打字机**：卡死判定加严格门槛（主机揭示数>本机）+ 定向复位（只停本机协程/清队列，不用游戏强制API）+ EvState 追加主机行游标对齐 |
+| **2026-09-12f（未发版）** | 🔄 待复测 | ①**撤销打字机“强制收尾”**（`ForceCompleteAll`/`DrainAllJobsInstant` 实测把后续所有打印动画弄没）→ 改纯诊断 `[Teleprinter] STUCK ...`；②**追踪器不再每次着弹同步**（弹道起点已同步→自然一致），只保留中途加入强制对齐（协议加 `force`）|
+| **2026-09-12e（未发版）** | 🔄 待复测 | ①**打字机卡死“强制同步”改为完整收尾**：新增 `CompleteLocally()`（游戏自带 `ForceCompleteAll`/`DrainAllJobsInstant` + 清 `_pendingJobs` + `_isRunning=false`），用于卡死分支 / `EvPrint` 提交前清理 / `Tick` 客机侧卡死自愈——修“强制同步不完全 → 后续任务打字针起始位置/动画状态/换行全错”；②上一版：弹道起点根因（铁巢地图图标 `TurretLocation`）已由 `NestSync` 同步 |
+| **2026-09-12d（未发版）** | 🔄 待复测 | **弹道起点根因锁定并修复**：炮弹起点 = `Tactical Map/Canvas/MapRoot/TurretLocation`（铁巢地图图标，= `GunController.firePoint`）；客机该图标停在场景默认值 → 弹道整体平移 → 落点不同。修：`NestSync`（146）随铁巢一并主机权威同步该图标（同包附加块 + 1.5s 心跳 + 客机补应用）。另：`ShotSync` 注册修复后已验证生效；照片角度已正常（用户确认）；漏开火=外部模组；打字机右侧偶发待定位 |
+| **2026-09-12c（未发版）** | 🔄 待复测 | ①**落点差的真源入**：弹道 `start`/`target` 两端**整体平移同一个固定向量 (-1.100,-0.100)**（aim/dur/dist 完全相同）——即弹道原点 `firePoint` 本地位置不同；②修 `ShotSync` **注册漏传 ChannelKey**（主日志 `[Registry] type=0 … ShotSync` → 整轮未注册）→ 修后落点直接一致；③停用未生效的“同步随机种子”，改为逐张照片角度日志；④`BlockerSync` 加 3s 心跳补发（锁止组件出现/消失）；⑤客机漏开火根因=**膛内无弹**（已加显式日志）。详见 `docs/IMPACT_ASSESSMENT.md` |
+| **2026-09-12b（未发版）** | 🔄 待复测 | **客机落点不一致根因修复（治本）**：新增 `ShotSync`（动态通道 `shotparams`）——主机权威下发**炮弹发射参数**（shellId/起点/终点/飞行时长/路径长），客机套用到本地同发炮弹 → 两端同一条弹道、落点一致（根因：客机复现开火用的是自己那一刻的本地物理瞄准状态）。诊断 `[ShotDiag] fire`/`[ShotDiag] init` 双端对照。详见 `docs/IMPACT_ASSESSMENT.md` |
+| **2026-09-12（未发版）** | 🔄 待复测 | ①**照片“拍摄角度/方向”不同步**：`ImpactSync`（13）**重新设计**：主机广播自己照片的**真实随机角度** + 落点，客机在【本地报告后】+【包到达后】按标记配对写入（事件驱动、无定时窗口、不再用哈希算角度）（详见 `docs/IMPACT_ASSESSMENT.md`）；②**开局打字机偶发不同步**：`TeleprinterSync`（134）打字机未注册时暂存事件 + `Tick` 重试（详见 `docs/TELEPRINTER_MISSION.md`）|
 | **0.1.6** | ✅ **一切正常**（用户确认） | 只是有性能问题 |
 | **0.1.7（c6c1197 + 9aca1a8）** | ❌ 一大堆严重问题 | 修 FPS（EntitySync 节流、心跳 2s→5s、日志节流）+ 9aca1a8（ApplySnapshot 总是 SetState、Punchcard 上报去重、EntitySync 跳过 card 实体）后，出现：Arm 按钮 inactive、装填状态被拉回、卡牌交互异常等 |
 | **0.1.8** | 🔄 0.1.6 基线 + 多轮回归修复（2026-08-22~23） | 回退 9aca1a8（ReloadSync/PunchcardSync/EntitySync 恢复 0.1.6）+ F9 下移 + F10 复制剪贴板。随后迭代修复：推弹头字节错位、装填状态回拉（事件驱动，不再常规 SetState）、方向角动量/停止强制同步、装药差1（删强制覆盖 currentSelectedCharges）、Button Dispencer 开局误激活（移除 Tick 补激活链 + ChargeButtonSync 掩码同步 143）、预备激发/弹舱动作事件解耦（ArmSync 140/CylinderActionSync 141）、.Charge Dial 双向回归。**装药区域已全部正常（用户 2026-08-23 确认）**；剩余：着弹偶发多触发（IMPACT_ASSESSMENT.md）、.Charge Dial 偶发、怀表时间、仰角锁止等 |

@@ -16,7 +16,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class PunchcardSync : ISyncedModule
 {
-    public byte MsgType => 136;
+    public int MsgType => 136;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案，含附加类型 137），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new PunchcardSync(), null, null, CardSlotEventMsgType);
     /// <summary>卡牌入槽/出槽事件（MsgType=137）：PlaceCard/RemoveCard → 广播 → 对端执行同一操作，
     /// 槽位 CurrentCard 两端一致（购买依赖卡牌在槽）。</summary>
     public const byte CardSlotEventMsgType = 137;
@@ -28,6 +32,8 @@ public sealed class PunchcardSync : ISyncedModule
     private bool _applying;
     private int _sendLog;
     private int _recvLog;
+    private int _clientDiag; // 客机卡片状态诊断降频
+    private int _dragDiag;   // 客机卡片拖拽诊断降频
     // ⚠️ 实例缓存（2026-08-25 帧性能）：FindObjectsOfType 全场景扫描很贵（曾占 ~120ms/s）——从每 0.2s 移到低频刷新（3s + 场景切换）
     private PunchcardRuntime[] _cache;
     private float _cacheTimer;
@@ -68,6 +74,27 @@ public sealed class PunchcardSync : ISyncedModule
             {
                 if (cards == null || cards.Length == 0) return;
                 ClientSendDropEvents(net, cards);
+                // ⚠️ 2026-08-26 卡片诊断：客机卡片 active/位置（确认"客机用不了补给卡片"——卡片是否
+                // active=false 隐藏 / 位置异常 / 被 MapTokenSync 等误处理）。
+                if ((++_clientDiag % 30) == 1)
+                {
+                    try
+                    {
+                        string cdiag = "";
+                        int nAct = 0;
+                        for (int i = 0; i < cards.Length && i < 12; i++)
+                        {
+                            var c = cards[i];
+                            if (c == null) continue;
+                            bool act = false; try { act = c.gameObject.activeSelf; } catch { }
+                            if (act) nAct++;
+                            var p = c.transform.position;
+                            cdiag += $" #{i}:{(act ? "A" : "H")}@({p.x:0.0},{p.y:0.0},{p.z:0.0})";
+                        }
+                        CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] client cards n={cards.Length} act={nAct} [{cdiag}]");
+                    }
+                    catch { }
+                }
             }
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"PunchcardSync Tick: {ex.Message}"); }
@@ -156,11 +183,14 @@ public sealed class PunchcardSync : ISyncedModule
         var w = NetProtocol.Begin((MsgType)MsgType);
         w.Put((byte)1);
         bool any = false;
+        // ⚠️ 2026-08-26 拖拽诊断：打印卡片 DraggableItem 拖拽状态（确认"客机无法交互"——卡片能否拖）。
+        bool anyDrag = false;
         for (int i = 0; i < n; i++)
         {
             var c = cards[i];
             if (c == null) continue;
             bool dragging = IsBeingDragged(c);
+            if (dragging) anyDrag = true;
             if (!_dragState.TryGetValue(c, out var prev)) { _dragState[c] = dragging; continue; }
             if (prev && !dragging) // 刚放下
             {
@@ -177,6 +207,15 @@ public sealed class PunchcardSync : ISyncedModule
                 any = true;
             }
             else _dragState[c] = dragging;
+        }
+        if (anyDrag && (++_dragDiag % 20) == 1)
+        {
+            try
+            {
+                var d0 = cards[0] != null ? cards[0].GetComponent<DraggableItem>() : null;
+                CoopRuntime.LogSource?.LogInfo($"[PunchcardSync] client dragging detected n={n} dragItem={(d0 == null ? "null" : (d0.enabled ? "enabled" : "DISABLED"))} isBeingDragged={(d0 == null ? "?" : d0.IsBeingDragged.ToString())}");
+            }
+            catch { }
         }
         if (!any) return;
         net.EnqueueBatch(NetProtocol.Snapshot(w), false);

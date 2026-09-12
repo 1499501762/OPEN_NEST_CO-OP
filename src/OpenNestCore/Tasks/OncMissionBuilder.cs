@@ -42,6 +42,8 @@ public sealed class OncMissionBuilder
     public OncMissionBuilder Described(string description) { _mission.Description = description; return this; }
     public OncMissionBuilder InScene(string sceneName) { _mission.SceneName = sceneName; return this; }
     public OncMissionBuilder WithSeed(int seed) { _mission.Seed = seed; return this; }
+    /// <summary>完成/失败时走原生 MissionManager 结算（D 方案，可选）。</summary>
+    public OncMissionBuilder WithNativeComplete(bool on = true) { _mission.NativeComplete = on; return this; }
     /// <summary>前置任务 id（全部完成后才解锁本任务）。</summary>
     public OncMissionBuilder Requires(params string[] missionIds)
     {
@@ -121,6 +123,12 @@ public sealed class OncMissionBuilder
     public OncMissionBuilder End() => Add(OncNode.End());
     public OncMissionBuilder Fail() => Add(OncNode.Fail());
     public OncMissionBuilder Custom(Action<OncMissionContext> action) => Add(OncNode.Custom(action));
+    /// <summary>脚本化模块：按名分派到宿主注册的脚本模块（C# 回调 / JSON 解释执行），参数为 JSON 字符串。</summary>
+    public OncMissionBuilder Scripted(string moduleName, string args = null) => Add(OncNode.Scripted(moduleName, args));
+    /// <summary>脚本化条件：进节点问脚本模块布尔结果，true 走 To[0]、false 走 To[1]。</summary>
+    public OncMissionBuilder ScriptedCondition(string moduleName, string args = null) => Add(OncNode.ScriptedCondition(moduleName, args));
+    /// <summary>脚本化挂起：留在激活表，每帧问脚本模块 BoolResult，true 才继续。</summary>
+    public OncMissionBuilder ScriptedWait(string moduleName, string args = null) => Add(OncNode.ScriptedWait(moduleName, args));
 
     /// <summary>构造任务图（自动确定入口节点）。</summary>
     public OncMission Build()

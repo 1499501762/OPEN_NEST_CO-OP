@@ -45,6 +45,10 @@ public static class CoopRuntime
 
         LogSource?.Info($"{NetConfig.Name} v{NetConfig.Version} started (platform-agnostic core). Steam running: {Steamworks.SteamAPI.IsSteamRunning()}");
 
+        // 配置文件（标准 INI：BepInEx/config 或 UserData/OpenNestCoop.cfg；缺失则生成默认 + 注释）
+        // ⚠️ 必须在模块注册/首次 Tick 前加载——各同步模块在 Tick/OnPacket 里读 CoopConfig 决定是否同步。
+        CoopConfig.Init();
+
         // 独立文件日志：诊断/联机日志 → frame/net/sync 独立 .log（主日志安静 → 控制台不刷屏 → 帧性能提升）
         InitFileLogs();
 
@@ -67,7 +71,10 @@ public static class CoopRuntime
         // 帧性能诊断菜单：FPS/帧时间 + 每模块 CPU 开销（FrameProfiler 统计；F9 循环内显示）
         ClassInjector.RegisterTypeInIl2Cpp<Debug.FrameDiagUI>();
         AddComponent<Debug.FrameDiagUI>();
-        // 诊断菜单循环切换器（F9）：不显示→帧→网络→交互→不显示 循环（替代 F7/F8/F9 独立按键）
+        // 自定义任务引擎节点图完整可视化（F9 循环内显示：节点逻辑连线 + 内容 + 状态着色 + 缩放/平移/选中检查器）
+        ClassInjector.RegisterTypeInIl2Cpp<Debug.MissionGraphViewUI>();
+        AddComponent<Debug.MissionGraphViewUI>();
+        // 诊断菜单循环切换器（F9）：不显示→帧→网络→任务→交互→不显示 循环（替代 F7/F8/F9 独立按键）
         ClassInjector.RegisterTypeInIl2Cpp<Debug.DiagCycleController>();
         AddComponent<Debug.DiagCycleController>();
 
@@ -76,11 +83,10 @@ public static class CoopRuntime
 
         // 同步方案：--sync new 走 SyncV2 分层（测试版，不注册旧模块）；默认 old 走 V1 稳定线。
         // 双端需同方案（Hello/Welcome 握手校验，见 NetManager）。
+        // ⚠️ 模块自注册：每个模块在自己文件里用 [ModuleInitializer] 入队（CoopSyncRegistry.PendingRegister，
+        // 按方案 V1/V2 标记），这里解析 --sync 方案后统一冲刷（V1/V2 互斥，只注册当前方案对应的模块）。
         CoopLog.Info("Coop.syncScheme", () => $"sync scheme: new={OpenNestCoop.Net.AutoJoin.WantNewSync}");
-        if (OpenNestCoop.Net.AutoJoin.WantNewSync)
-            SyncV2.SyncV2Bootstrap.RegisterAll();
-        else
-            RegisterLegacyModules();
+        CoopSyncRegistry.FlushPending();
 
         // 提前触发 Animator 化身 AssetBundle 异步加载（本地 file:// 帧内完成，玩家加入时通常已就绪）
         AnimatorAvatarVisualProvider.Instance.TryLoad();
@@ -88,6 +94,9 @@ public static class CoopRuntime
         // 自定义任务：从外部游戏目录 CSM 文件夹按文件名序读取 JSON 任务/战役并注册（文件夹不存在则静默跳过）
         try { OpenNestCoop.GameSync.OncMissionBridge.LoadFromGameFolder(); }
         catch (System.Exception ex) { LogSource?.LogWarning($"[CoopRuntime] OncMission LoadFromGameFolder: {ex.Message}"); }
+        // 脚本化模块：注册内置示例模块（announce/ping），模组可再用 RegisterScriptedModule 注册自己的
+        try { OpenNestCoop.GameSync.OncMissionBridge.RegisterBuiltinScriptedModules(); }
+        catch (System.Exception ex) { LogSource?.LogWarning($"[CoopRuntime] OncMission RegisterBuiltinScriptedModules: {ex.Message}"); }
 
         // 游戏原生 UI 桥接（OpenNestCore.UI.NativeUi）：本地化/通知/ESC/主菜单/光标能力抽象，供模组平台无关调用
         IronNestNativeUi.Hook();
@@ -112,6 +121,12 @@ public static class CoopRuntime
         // 落点/照片诊断 → sync（HarmonyPatches ImpactDiag/PhotoDiag；key=impact.diag/photo.diag）
         CoopLog.RouteToFile("impact.", "sync");
         CoopLog.RouteToFile("photo.", "sync");
+        CoopLog.RouteToFile("shot.", "sync");   // 炮弹发射参数（ShotSync）+ 发射参数诊断（[ShotDiag]）
+        CoopLog.RouteToFile("blocker.", "sync"); // 锁止组件（BlockerSync）
+        CoopLog.RouteToFile("BlockerSync", "sync");
+        // ⚠️ 2026-08-30：自定义任务诊断 → 独立 mission.log（OncMissionBridge 全部 onc.mission.* + 节点诊断 UI mission.diag）
+        CoopLog.RouteToFile("onc.mission.", "mission");
+        CoopLog.RouteToFile("mission.diag", "mission");
         // ⚠️ 2026-08-26：.Charge Dial 值源诊断（HarmonyPatches PostDialValueChanged）→ sync
         CoopLog.RouteToFile("chargedial.", "sync");
         // 联机同步模块 → sync 文件（主日志/控制台不刷屏 → 帧性能提升）
@@ -136,69 +151,13 @@ public static class CoopRuntime
             "RecordPlayerSync","StateSnapshot","ButtonClickSync",
             // ⚠️ 直调消息前缀补充（模块 key 可能是 XxxSync，但 LogSource 直调用 [Xxx] 短名）
             "ImpactSync","Impact","MissionEvent","Mission","Purchase","PurchaseV2","Notification",
+            "ShotSync","ShotDiag",
             "MapSync","M3Env","M3EnvV2","TurretSync","PlayerSync","PlayerSyncV2","XSync",
             "CatSyncV2","CoffeeSyncV2","MissionSyncV2","PunchcardSyncV2","RecordItemSyncV2",
             "ReloadSyncV2","RecordPlayerSyncV2","MapMarkerSyncV2","HatchSyncV2","GunLinkSyncV2",
             "SequenceSyncV2","ShellSyncV2","MapTokenSyncV2","TeleprinterSyncV2",
         };
         foreach (var p in syncMsgPrefix) OpenNestCore.Logging.RoutingLogger.RouteToFile(p, "sync");
-    }
-
-    /// <summary>注册 V1（旧方案）全部同步模块——默认方案。--sync new 时不调用。</summary>
-    private static void RegisterLegacyModules()
-    {
-        // ⚠️ 2026-08-25：炮弹落点同步（MsgType=13）——提前注册（排最前，避免被后续模块构造异常/顺序问题阻断注册）
-        CoopSyncRegistry.RegisterModule(new ImpactSync());
-        // ⚠️ 2026-08-26：铁巢（TurretController）位置同步（MsgType=146，主机权威，对齐 Synchrony NestMoveBridge）——
-        // 铁巢位置两端一致 → 追踪器/落点/打字机 [GRID <turret>] 等依赖铁巢基准的功能一致
-        CoopSyncRegistry.RegisterModule(new NestSync());
-        CoopSyncRegistry.RegisterModule(new CoffeeSync());
-        CoopSyncRegistry.RegisterModule(new MissionSync());
-        // 中途加入快照容器（MsgType=30）：收集各模块快照打包，新成员收到后分发应用
-        CoopSyncRegistry.RegisterModule(new StateSnapshotSync());
-        // 注册各模块快照构建/应用（方案 B：状态注册表）
-        StateSnapshotSync.Register("mission", MissionSync.BuildMissionSnapshot, MissionSync.ApplyMissionSnapshot);
-        StateSnapshotSync.Register("hatch", HatchSync.BuildHatchSnapshot, HatchSync.ApplyHatchSnapshot);
-        StateSnapshotSync.Register("sequence", SequenceSync.BuildSequenceSnapshot, SequenceSync.ApplySequenceSnapshot);
-        StateSnapshotSync.Register("mapmarker", MapMarkerSync.BuildMapMarkerSnapshot, MapMarkerSync.ApplyMapMarkerSnapshot);
-        StateSnapshotSync.Register("maptoken", MapTokenSync.BuildMapTokenSnapshot, MapTokenSync.ApplyMapTokenSnapshot);
-        StateSnapshotSync.Register("recordplayer", RecordPlayerSync.BuildRecordPlayerSnapshot, RecordPlayerSync.ApplyRecordPlayerSnapshot);
-        // 按钮 toggle 状态快照（指示灯/楼梯盖板等多 toggler 按钮中途加入对齐）
-        StateSnapshotSync.Register("button", ButtonClickSync.BuildButtonSnapshot, ButtonClickSync.ApplyButtonSnapshot);
-        // 任务实体快照（反炮兵炮兵/药包等动态实体中途加入对齐；EntitySync 需先注册模块）
-        StateSnapshotSync.Register("entity", EntitySync.BuildEntitySnapshot, EntitySync.ApplyEntitySnapshot);
-        CoopSyncRegistry.RegisterModule(new MissionEventSync());
-        // 任务打字机通知同步（UINotificationManager.ShowNotification 事件，MsgType=131）
-        CoopSyncRegistry.RegisterModule(new NotificationSync());
-        // 任务打字机打印同步（Teleprinter.SubmitLines/ClearAll/ClearAlarm 事件，MsgType=134）
-        CoopSyncRegistry.RegisterModule(new TeleprinterSync());
-        CoopSyncRegistry.RegisterModule(new CounterBatterySync());
-        CoopSyncRegistry.RegisterModule(new EntitySync());
-        CoopSyncRegistry.RegisterModule(new ReconPhotoSync());
-        CoopSyncRegistry.RegisterModule(new CatSync(), CatSync.CatEventMsgType);
-        CoopSyncRegistry.RegisterModule(new MapMarkerSync());
-        CoopSyncRegistry.RegisterModule(new RecordItemSync());
-        CoopSyncRegistry.RegisterModule(new ShellSync());
-        CoopSyncRegistry.RegisterModule(new SequenceSync());
-        CoopSyncRegistry.RegisterModule(new HatchSync());
-        CoopSyncRegistry.RegisterModule(new ButtonClickSync(), ButtonClickSync.ToggleStateMsgType);
-        // 预备激发火炮同步（ArmedFireRelayOneShot 事件解耦，MsgType=140）
-        CoopSyncRegistry.RegisterModule(new ArmSync());
-        // 弹舱动作同步（CylinderShellSelector 推弹/切弹事件解耦，MsgType=141）
-        CoopSyncRegistry.RegisterModule(new CylinderActionSync());
-        // 装药库存同步（PowderChargeInventory.CurrentCharges，MsgType=142）——Button Dispencer active 随库存刷新，
-        // 客机库存不同步 → 高编号按钮 inactive 锁定（2026-08-23）
-        CoopSyncRegistry.RegisterModule(new ChargeInventorySync());
-        // Button Dispencer active 掩码同步（MsgType=143）——主机权威掩码 → 客机 SetActive 对齐（客机激活链断修复）
-        CoopSyncRegistry.RegisterModule(new ChargeButtonSync());
-        CoopSyncRegistry.RegisterModule(new MapTokenSync());
-        // 仰角联动锁定（GunElevationLinkCoordinator.isLinked，`.Elevation Lever Locking Bolt`）——2026-08-22 恢复（曾被误删）
-        CoopSyncRegistry.RegisterModule(new GunLinkSync());
-        // 征信点卡牌位置同步（卡牌拖到卡槽插入 → 拉杆购买；卡牌位置/插入状态两端一致）
-        CoopSyncRegistry.RegisterModule(new PunchcardSync(), PunchcardSync.CardSlotEventMsgType);
-        M3EnvSync.Register();
-        RequisitionSync.Register();
-        CoopSyncRegistry.RegisterModule(new PurchaseSync());
     }
 
     /// <summary>会话结束/卸载时释放网络 + 清理 AssetBundle 生命周期。</summary>

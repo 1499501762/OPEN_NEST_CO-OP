@@ -16,37 +16,47 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class GunLinkSync : ISyncedModule
 {
-    public byte MsgType => 121;
-    private const float Interval = 0.3f;
-    private float _timer;
-    private int _log;
-    private readonly Dictionary<GunElevationLinkCoordinator, bool> _known = new();
+    public int MsgType => 121;
 
-    public void Tick(float dt)
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new GunLinkSync());
+
+    /// <summary>场景单例缓存（GunElevationLinkCoordinator）：场景切换/丢失时刷新，不再周期 FindObjectsOfType。</summary>
+    private static GunElevationLinkCoordinator[] _coordCache;
+    private static int _cacheScene = -1;
+    /// <summary>最后同步的联动状态（场景单例只有一个 coordinator）。变化才广播，防 SetLinked/ToggleLinked 双触发重复。</summary>
+    private static bool? _lastLinked;
+
+    private static GunElevationLinkCoordinator GetCoord()
     {
+        int sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex;
+        if (_coordCache == null || sc != _cacheScene)
+        {
+            _cacheScene = sc;
+            _coordCache = UnityEngine.Object.FindObjectsOfType<GunElevationLinkCoordinator>();
+        }
+        return (_coordCache != null && _coordCache.Length > 0) ? _coordCache[0] : null;
+    }
+
+    /// <summary>事件驱动：不再 Tick 轮询。SetLinked/ToggleLinked 的 Harmony postfix 调
+    /// <see cref="OnLocalSetLinked"/> 广播，收到远端包 OnPacket 应用。</summary>
+    public void Tick(float dt) { }
+
+    /// <summary>本地联动状态变化（GunElevationLinkCoordinator.SetLinked/ToggleLinked postfix）→ 变化才广播。
+    /// 任意端操作权威：主机广播给全员；客机上报主机（主机中继）。</summary>
+    public static void OnLocalSetLinked(GunElevationLinkCoordinator c)
+    {
+        if (c == null) return;
         var net = CoopRuntime.Net;
         if (net == null) return;
-        _timer += dt;
-        if (_timer < Interval) return;
-        _timer = 0f;
         if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;
-        try
-        {
-            var coords = UnityEngine.Object.FindObjectsOfType<GunElevationLinkCoordinator>();
-            if (coords == null || coords.Length == 0) return;
-            foreach (var c in coords)
-            {
-                if (c == null) continue;
-                bool linked;
-                try { linked = c.isLinked; } catch { continue; }
-                if (_known.TryGetValue(c, out var last) && last == linked) continue;
-                _known[c] = linked;
-                Broadcast(c, linked, net);
-            }
-            if ((++_log % 20) == 1)
-                CoopLog.Debug("GunLinkSync.scan", () => $"[GunLinkSync] scan coords={coords.Length}");
-        }
-        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"GunLinkSync Tick: {ex.Message}"); }
+        bool linked;
+        try { linked = c.isLinked; } catch { return; }
+        // 变化才广播：SetLinked 与 ToggleLinked 可能都触发 postfix（ToggleLinked 内部调 SetLinked）→ 去重
+        if (_lastLinked.HasValue && _lastLinked.Value == linked) return;
+        _lastLinked = linked;
+        Broadcast(c, linked, net);
     }
 
     public void OnPacket(ulong from, byte[] data)
@@ -66,9 +76,8 @@ public sealed class GunLinkSync : ISyncedModule
 
     private static void Apply(bool linked)
     {
-        var coords = UnityEngine.Object.FindObjectsOfType<GunElevationLinkCoordinator>();
-        if (coords == null || coords.Length == 0) return;
-        var c = coords[0];
+        var c = GetCoord();
+        if (c == null) return;
         try
         {
             if (c.isLinked != linked)
@@ -76,6 +85,7 @@ public sealed class GunLinkSync : ISyncedModule
                 c.isLinked = linked; // set pub，驱动游戏联动状态/动画
                 CoopRuntime.LogSource?.LogInfo($"[GunLinkSync] applied linked={linked}");
             }
+            _lastLinked = linked; // 更新（防环：下次本地变化检测基于最新已同步状态）
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"GunLinkSync Apply: {ex.Message}"); }
     }
@@ -92,5 +102,5 @@ public sealed class GunLinkSync : ISyncedModule
 
     public void OnSessionStarted() { }
     public void OnSessionEnded() { Reset(); }
-    public void Reset() { _timer = 0f; _known.Clear(); }
+    public void Reset() { _lastLinked = null; _coordCache = null; _cacheScene = -1; }
 }

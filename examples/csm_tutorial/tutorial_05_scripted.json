@@ -1,0 +1,15 @@
+{
+  "Id": "tutorial.05.scripted",
+  "DisplayName": "教程5 脚本化模块",
+  "Description": "Scripted 节点按 ModuleName 分派到 C# 脚本模块：print（打字机）/ announce（通知）/ log。这些是内置模块（B6），无需额外注册即可用。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Scripted", "ModuleName": "print", "ModuleArgs": "{\"text\":\"教程5：print 脚本模块（打字机）\"}", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Scripted", "ModuleName": "announce", "ModuleArgs": "{\"title\":\"脚本化\",\"text\":\"announce 通知模块\",\"duration\":4}", "To": ["n4"] },
+    { "Id": "n4", "Kind": "Scripted", "ModuleName": "log", "ModuleArgs": "{\"note\":\"log 模块示例（只打日志）\"}", "To": ["n5"] },
+    { "Id": "n5", "Kind": "Print", "Message": "教程5：三个脚本模块执行完毕。", "To": ["n6"] },
+    { "Id": "n6", "Kind": "End" }
+  ]
+}

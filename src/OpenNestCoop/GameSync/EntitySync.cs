@@ -16,8 +16,18 @@ public sealed class EntitySync : ISyncedModule
 {
     /// <summary>高频任务实体状态 → 容忍丢失，全局降频时优先降（per-module 分级）。</summary>
     public NetModulePriority NetPriority => NetModulePriority.Low;
-    public byte MsgType => 104;
+    public int MsgType => 104;
 
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册；同时注册中途加入快照
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister()
+    {
+        CoopSyncRegistry.PendingRegister(false, () => new EntitySync());
+        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("entity", BuildEntitySnapshot, ApplyEntitySnapshot));
+    }
+
+    /// <summary>主机检测/广播间隔。2026-08-31：0.1s 全量 Collect 开销过大（用户“高频太夸张”）→ 恢复 0.5s。
+    /// 列车平滑改由客机端每帧插值（TickSmooth）实现，不靠高频广播。只有变化实体才广播。</summary>
     private const float Interval = 0.5f;
     private const float PosTolerance = 0.05f;
     /// <summary>主机心跳全量广播间隔（2026-08-26）：客机缺失实体靠心跳补齐——主机只在“变化时”广播会让
@@ -37,7 +47,10 @@ public sealed class EntitySync : ISyncedModule
         public float LX;
         public float LY;  // 战术地图图标位置（Location.LocalPosition）——主机权威，图标实际摆位靠它
         public int State;
-        public int Hp;
+        public int Hp;     // 当前血量（MapEntity.Health）
+        public int MaxHp;  // 最大血量（MapEntity.MaxHealth）——击杀判定必需，缺它补建实体不能击杀
+        public int Armour; // 装甲
+        public int Stars;  // 星级
         public bool Alive; // 存活标志（击杀时 IsAlive→false）——主机权威，客机端击杀标记/实体死亡表现靠它
         /// <summary>实体种类（EntityRoles 枚举 int）——⚠️ 2026-08-26：补传种类（客机补齐/创建用真实 Role，
         /// 修复“客机同步到的实体种类全是 Enemy”）。MapEntity.Role 可读写（interop）。</summary>
@@ -46,10 +59,14 @@ public sealed class EntitySync : ISyncedModule
         /// created missing 补齐时 CreateMapEntity 第 10 参传 Icon，否则客机补建的实体 Icon 空 → 地图类型图标丢失
         /// （“客机实体丢部分类型”根因——日志 kind 枚举对，但 Icon 空 → 视觉图标缺）。</summary>
         public string Icon;
+        /// <summary>⚠️ 2026-09-05 位置变化检测阈值降到 0.003：列车速度 ~0.01/s，0.5s 只动 0.005，
+        /// 原阈值 0.1 导致列车位置只在 5s 心跳广播（每 5s 跳 0.05，客机插值后"一窜一窜"）。
+        /// 降到 0.003 让列车 0.5s 变化广播（跳 0.005，几乎不可见），配合 LerpRate=5 平滑跟随。</summary>
         public bool SameAs(Ent o) =>
             Mathf.Abs(X - o.X) < PosTolerance && Mathf.Abs(Y - o.Y) < PosTolerance
-            && Mathf.Abs(LX - o.LX) < 0.1f && Mathf.Abs(LY - o.LY) < 0.1f
-            && State == o.State && Hp == o.Hp && Alive == o.Alive && Kind == o.Kind
+            && Mathf.Abs(LX - o.LX) < 0.003f && Mathf.Abs(LY - o.LY) < 0.003f
+            && State == o.State && Hp == o.Hp && MaxHp == o.MaxHp && Armour == o.Armour && Stars == o.Stars
+            && Alive == o.Alive && Kind == o.Kind
             && string.Equals(Icon ?? "", o.Icon ?? "", StringComparison.Ordinal);
     }
 
@@ -58,6 +75,14 @@ public sealed class EntitySync : ISyncedModule
     /// <summary>已触发击杀表现的实体 id（去重：每实体击杀只触发一次 OnDestroyed，避免每 Tick 重复）。
     /// static：ApplyEntity 是 static。EntitySync 由 CoopSyncRegistry 单例持有，static 安全。</summary>
     private static readonly HashSet<string> _killed = new();
+    /// <summary>客机端插值目标：实体 id → 位置组件（EntityLocation）+ 目标本地坐标（LX/LY）。
+    /// 列车视觉由 EntityLocation 驱动（ent.Position 是无效字段），故插值 PositionInRootSpace 而非 ent.Position。</summary>
+    private static readonly Dictionary<string, EntityLocation> _lerpLocs = new();
+    private static readonly Dictionary<string, Vector2> _lerpTargets = new();
+    /// <summary>⚠️ 2026-09-05 指数平滑速率：30（快收敛）时列车位置广播每 5s 跳一次（0.04），cur 几帧内
+    /// 追上 → 视觉"一窜一窜"。降到 5（约 0.6s 收敛 95%），cur 平滑滑动到跳变目标，列车不再"窜"。</summary>
+    private const float LerpRate = 5f;
+    private static int _smoothDiag;
     /// <summary>回退扫描节流：找不到的实体 ID 上次全场景扫描时间（5s 内不重复 FindObjectsOfTypeAll<EntityLocation>
     /// ——客户端本地缺实体（如动态炮兵）时每 0.5s 广播触发回退扫描全场景 → massive FPS loss 主因）。</summary>
     private static readonly Dictionary<string, float> _missingScan = new();
@@ -66,11 +91,20 @@ public sealed class EntitySync : ISyncedModule
 
     private static int _kindAppLog;
     private static int _kindSendLog;
+    /// <summary>漂移诊断计数（applypos 日志降频）。</summary>
+    private static int _posDiagLog;
+    /// <summary>图标漂移诊断计数（collectpos 日志降频）。</summary>
+    private static int _collectDiag;
+    /// <summary>主机变化实体诊断计数（hostchg 日志降频）。</summary>
+    private static int _hostChgLog;
 
     public void Tick(float dt)
     {
         var net = CoopRuntime.Net;
         if (net == null) return;
+
+        // ⚠️ 2026-09-04 列车平滑：每帧把实体位置指数逼近目标（替代 ApplyEntity 直接瞬移 → “一跳一跳”）。
+        TickSmooth(dt);
 
         _timer += dt;
         if (_timer < Interval) return;
@@ -100,6 +134,19 @@ public sealed class EntitySync : ISyncedModule
                 if (heartbeat || !_hknown.TryGetValue(e.Id, out var k) || !k.SameAs(e))
                 { _hknown[e.Id] = e; changed.Add(e); }
             if (changed.Count > 0) Broadcast(net, changed);
+            // ⚠️ 2026-08-26 漂移诊断：打印变化实体 ID + 位置（确认 broadcast N 是谁在动——列车/机械化单位
+            // 移动实体，位置每 0.5s 变化）。对比客机 collectpos 确认两端移动实体位置差（漂移量）。
+            if (changed.Count > 0 && (++_hostChgLog % 20) == 1)
+            {
+                try
+                {
+                    string ids = "";
+                    for (int i = 0; i < changed.Count && i < 8; i++)
+                        ids += (ids.Length > 0 ? "," : "") + changed[i].Id + "=(" + changed[i].X.ToString("0.###") + "," + changed[i].Y.ToString("0.###") + ")";
+                    CoopLog.Info("EntitySync.hostchg", () => $"[EntitySync] hostchg n={changed.Count} [{ids}]", 3f);
+                }
+                catch { }
+            }
         }
         // ⚠️ 2026-08-26 主机权威：客机**不上行实体位置**。位置全由主机权威广播（心跳全量 5s 兜底对齐）。
         // 原实现客机本地 Collect 位置变化 → SendToHost 上行 → 主机 ApplyEntity 应用（覆盖主机权威位置）→
@@ -147,6 +194,9 @@ public sealed class EntitySync : ISyncedModule
                 {
                     e.Kind = r.GetInt();    // 仅广播包（客机接收）带 Kind
                     e.Icon = r.GetString(); // 仅广播包带 Icon（视觉图标）
+                    e.MaxHp = r.GetInt();   // 最大血量
+                    e.Armour = r.GetInt();
+                    e.Stars = r.GetInt();
                 }
                 ApplyEntity(e, applyKind: !net.IsHost);
                 applied.Add(e);
@@ -171,6 +221,39 @@ public sealed class EntitySync : ISyncedModule
     public void Reset()
     {
         _known.Clear(); _hknown.Clear(); _applying = false; _killed.Clear(); _missingScan.Clear();
+        _lerpTargets.Clear(); _lerpLocs.Clear();
+    }
+
+    /// <summary>客机端每帧插值：实体图标位置（EntityLocation，PositionInRootSpace）指数逼近主机广播目标
+    /// （列车平滑，不瞬移）。指数平滑（同 PlayerSync）：t = 1 - exp(-LerpRate*dt)。
+    /// ⚠️ 2026-09-04 持续锁定：收敛后**不移除**目标——否则本地任务图立即重新接管列车（推前），插值又拉回
+    /// → 前进-后退抖动（"不平滑"）。持续把列车锁定到主机位置，覆盖本地任务图移动。只在实体销毁时清理。
+    /// ⚠️ 列车视觉由 EntityLocation 驱动，ent.Position 是无效字段——插值必须对 EntityLocation 做。</summary>
+    private static void TickSmooth(float dt)
+    {
+        if (_lerpTargets.Count == 0) return;
+        var fm = FireMission.Instance;
+        if (fm == null) return;
+        float t = 1f - Mathf.Exp(-LerpRate * dt);
+        var gone = new List<string>();
+        foreach (var kv in _lerpTargets)
+        {
+            EntityLocation loc = null;
+            try { if (_lerpLocs.TryGetValue(kv.Key, out var l)) loc = l; } catch { }
+            if (loc == null || loc.gameObject == null) { gone.Add(kv.Key); continue; }
+            try
+            {
+                var cur = loc.LocalPosition;
+                var next = Vector2.Lerp(cur, kv.Value, t);
+                fm.PositionInRootSpace(loc.gameObject, next);
+                // 插值诊断（降频 ~1s）：当前值 vs 目标值——cur 逐渐逼近 target = 插值生效（平滑）；
+                // cur 直接跳到 target = 插值未生效（瞬移）。
+                if ((++_smoothDiag % 60) == 1)
+                    CoopLog.Info("EntitySync.smooth", () => $"[EntitySync] smooth {kv.Key} cur=({cur.x:0.###},{cur.y:0.###}) target=({kv.Value.x:0.###},{kv.Value.y:0.###}) t={t:0.###}", 1f);
+            }
+            catch { }
+        }
+        foreach (var id in gone) { _lerpTargets.Remove(id); _lerpLocs.Remove(id); }
     }
 
     // ---------------- 内部 ----------------
@@ -220,6 +303,9 @@ public sealed class EntitySync : ISyncedModule
                         try { kind = (int)e.Role; } catch { }
                         string icon = "";
                         try { icon = e.Icon ?? ""; } catch { }
+                        int maxHp = 0; try { maxHp = e.MaxHealth; } catch { }
+                        int armour = 0; try { armour = e.Armour; } catch { }
+                        int stars = 0; try { stars = e.Stars; } catch { }
                         list.Add(new Ent
                         {
                             Id = e.ID,
@@ -229,10 +315,23 @@ public sealed class EntitySync : ISyncedModule
                             LY = lp.y,
                             State = (byte)(int)e.State,
                             Hp = e.Health,
+                            MaxHp = maxHp,
+                            Armour = armour,
+                            Stars = stars,
                             Alive = alive,
                             Kind = kind,
                             Icon = icon
                         });
+                        // ⚠️ 2026-08-26 图标漂移诊断：读 LX/LY（图标本地坐标）降频打印——对比两端战术地图
+                        // 实体图标位置（世界坐标已确认一致，图标可能因 ToLocalSpace 基准/插值不同而漂移）。
+                        if ((++_collectDiag % 120) == 1)
+                        {
+                            try
+                            {
+                                CoopLog.Info("EntitySync.collectpos", () => $"[EntitySync] collectpos id='{e.ID}' world=({p.x:0.###},{p.z:0.###}) local=({lp.x:0.###},{lp.y:0.###})", 5f);
+                            }
+                            catch { }
+                        }
                     }
                     catch { }
                 }
@@ -270,6 +369,9 @@ public sealed class EntitySync : ISyncedModule
                 try { kind = (int)e.Role; } catch { }
                 string icon = "";
                 try { icon = e.Icon ?? ""; } catch { }
+                int maxHp2 = 0; try { maxHp2 = e.MaxHealth; } catch { }
+                int armour2 = 0; try { armour2 = e.Armour; } catch { }
+                int stars2 = 0; try { stars2 = e.Stars; } catch { }
                 list.Add(new Ent
                 {
                     Id = e.ID,
@@ -279,6 +381,9 @@ public sealed class EntitySync : ISyncedModule
                     LY = lp.y,
                     State = (byte)(int)e.State,
                     Hp = e.Health,
+                    MaxHp = maxHp2,
+                    Armour = armour2,
+                    Stars = stars2,
                     Alive = alive,
                     Kind = kind,
                     Icon = icon
@@ -334,7 +439,7 @@ public sealed class EntitySync : ISyncedModule
                             // ⚠️ 2026-08-26：补传图标（e.Icon）——CreateMapEntity 第 10 参是 Icon，传空 → 补建实体图标缺失
                             // （视觉类型靠 Icon 非 Role，修复“客机实体丢部分类型”）。
                             var created = fm2.CreateMapEntity(e.Id, null, 0, new UnityEngine.Vector3(e.X, 0, e.Y),
-                                (EntityRoles)e.Kind, e.Hp, 0, 0, (MapEntityStates)e.State, e.Icon ?? "");
+                                (EntityRoles)e.Kind, e.MaxHp > 0 ? e.MaxHp : e.Hp, e.Armour, e.Stars, (MapEntityStates)e.State, e.Icon ?? "");
                             if (created != null)
                             {
                                 try { fm2.RegisterMapEntity(created); } catch { }
@@ -376,24 +481,33 @@ public sealed class EntitySync : ISyncedModule
                 catch { }
             }
             if (ent == null) return;
-            try
+            // ⚠️ 2026-09-04 列车平滑：不直接瞬移，记录插值目标（TickSmooth 每帧指数逼近 → 列车平滑不跳）。
+            // 列车视觉由 EntityLocation 驱动（ent.Position 是无效字段），故插值 PositionInRootSpace。
+            try { if (loc == null) loc = ent.Location; } catch { }
+            if (loc != null && loc.gameObject != null)
             {
-                if (loc == null) loc = ent.Location;
-                if (loc != null && loc.gameObject != null)
-                {
-                    var lp = new Vector2(e.LX, e.LY);
-                    // PositionInRootSpace 强制摆图标到主机坐标（绕开对端投影算法差异——战术地图图标两端一致根因）
-                    try { fm.PositionInRootSpace(loc.gameObject, lp); } catch { }
-                }
+                _lerpLocs[e.Id] = loc;
+                _lerpTargets[e.Id] = new Vector2(e.LX, e.LY);
             }
-            catch { }
-            // ⚠️ 2026-08-26 争抢修复：应用**世界坐标**（MapEntity.Position）——PositionInRootSpace 只摆图标 transform，
-            // 不更新 MapEntity.Position。而 Collect() 读的是 Position（世界坐标）→ 客机应用后世界坐标仍旧 →
-            // 客机永远判定实体"变化"（_known 存主机值但 Collect 读游戏值不同）→ 上行 → 主机广播 → 无限争抢循环
-            // （主机每 3s broadcast 36 ↔ 客机 recv 后上行 35 的循环）。两端都设（世界 + 图标本地）→ Collect 一致。
+            // ent.Position 仍设（世界坐标，无害；列车视觉靠 EntityLocation 插值）
             try { ent.Position = new UnityEngine.Vector3(e.X, 0, e.Y); } catch { }
             try { ent.State = (MapEntityStates)e.State; } catch { }
             try { ent.Health = e.Hp; } catch { }
+            // ⚠️ 2026-09-04 击杀修复：补全最大血量/装甲/星级（缺 MaxHealth 补建实体不能击杀）
+            try { if (e.MaxHp > 0) ent.MaxHealth = e.MaxHp; } catch { }
+            try { ent.Armour = e.Armour; } catch { }
+            try { ent.Stars = e.Stars; } catch { }
+            // ⚠️ 2026-08-26 漂移诊断：应用后读实体实际位置（世界 + 图标本地），对比主机广播值——
+            // 用户"实体还是漂移"。确认漂移量（PositionInRootSpace 后图标 transform 是否与主机值一致）。
+            if ((++_posDiagLog % 60) == 1)
+            {
+                try
+                {
+                    var ap = ent.Position;
+                    CoopRuntime.LogSource?.LogInfo($"[EntitySync] applypos id='{e.Id}' host=({e.X:0.###},0,{e.Y:0.###}) ent=({ap.x:0.###},{ap.y:0.###},{ap.z:0.###}) loc={loc?.gameObject?.name}");
+                }
+                catch { }
+            }
             // ⚠️ 2026-08-26：应用真实种类（MapEntity.Role 可读写 interop）——修复“客机同步到的实体种类全是 Enemy”。
             // Role 主机权威：只有主机广播/快照（applyKind=true）才设 Role；客机上行（主机端 applyKind=false）不覆盖。
             if (applyKind)
@@ -444,6 +558,9 @@ public sealed class EntitySync : ISyncedModule
             w.Put(e.Alive ? (byte)1 : (byte)0);
             w.Put(e.Kind); // ⚠️ 2026-08-26：补传种类（客机补齐/创建用真实 Role）
             w.Put(e.Icon ?? ""); // ⚠️ 2026-08-26：补传图标（视觉类型靠 Icon，非 Role——修复客机补齐实体图标缺失）
+            w.Put(e.MaxHp); // ⚠️ 2026-09-04：补传最大血量（击杀判定必需）
+            w.Put(e.Armour);
+            w.Put(e.Stars);
         }
         var data = NetProtocol.Snapshot(w);
         CoopLog.Debug("EntitySync.broadcast", () => $"[EntitySync] broadcast {list.Count}", 1f);
@@ -481,6 +598,9 @@ public sealed class EntitySync : ISyncedModule
                 w.Put(e.Alive ? (byte)1 : (byte)0);
                 w.Put(e.Kind); // ⚠️ 2026-08-26：补传种类
                 w.Put(e.Icon ?? ""); // ⚠️ 2026-08-26：补传图标
+                w.Put(e.MaxHp); // ⚠️ 2026-09-04：补传最大血量/装甲/星级
+                w.Put(e.Armour);
+                w.Put(e.Stars);
             }
             return NetProtocol.Snapshot(w);
         }
@@ -505,7 +625,10 @@ public sealed class EntitySync : ISyncedModule
                     State = r.GetByte(), Hp = r.GetInt(),
                     Alive = r.GetByte() != 0,
                     Kind = r.GetInt(),
-                    Icon = r.GetString() // ⚠️ 2026-08-26：快照带图标
+                    Icon = r.GetString(), // ⚠️ 2026-08-26：快照带图标
+                    MaxHp = r.GetInt(),
+                    Armour = r.GetInt(),
+                    Stars = r.GetInt()
                 };
                 ApplyEntity(e, applyKind: true);
             }

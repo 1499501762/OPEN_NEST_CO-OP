@@ -18,7 +18,11 @@ public sealed class CounterBatterySync : ISyncedModule
 {
     public static CounterBatterySync Instance;
 
-    public byte MsgType => 103;
+    public int MsgType => 103;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new CounterBatterySync());
 
     private int _seed;          // 主机：递增种子
     private int _pendingSeed;   // 客户端：最近收到的种子

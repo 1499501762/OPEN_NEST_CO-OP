@@ -1,0 +1,17 @@
+{
+  "Id": "sample.scriptflow",
+  "DisplayName": "脚本化流程（示例）",
+  "Description": "B1/B2/A2 综合样板：Scripted 动作（print 打字机）→ StartTimer 计时 → ScriptedWait 挂起（模块问\"好了没\"）→ ScriptedCondition 条件分支（模块布尔结果走不同结局）。模块需 C# 注册（见 README / docs/CUSTOM_MISSION.md 15.7）。纯新增任务。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Scripted", "ModuleName": "print", "ModuleArgs": "{\"text\":\"脚本化流程开始！\"}", "To": ["n3"] },
+    { "Id": "n3", "Kind": "StartTimer", "TimerId": "t1", "Seconds": 30, "To": ["n4"] },
+    { "Id": "n4", "Kind": "ScriptedWait", "ModuleName": "wait_player_ready", "To": ["n5"] },
+    { "Id": "n5", "Kind": "ScriptedCondition", "ModuleName": "is_timer_ok", "To": ["win", "lose"] },
+    { "Id": "win", "Kind": "Print", "Message": "条件通过，任务成功！", "To": ["end"] },
+    { "Id": "lose", "Kind": "Fail" },
+    { "Id": "end", "Kind": "End" }
+  ]
+}

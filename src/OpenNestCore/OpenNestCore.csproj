@@ -10,7 +10,7 @@
     <Version>0.1.0</Version>
     <!-- 通用工具库：OpenNest 联机模组的平台无关通用能力（日志 / 化身扩展 API / AssetBundle IL2CPP 工具）。
          给第三方模组开发者引用本 dll；OpenNestCoop/MelonMod 通过链接源码使用（避免 interop 双平台兼容问题）。 -->
-    <GameDir Condition="'$(GameDir)'==''">G:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <GameDir Condition="'$(GameDir)'==''">C:\Iron Nest Heavy Turret Simulator</GameDir>
     <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
     <!-- MelonLoader interop 目录。注意：两加载器的 Il2CppInterop.Runtime 版本不同
          （BepInEx 1.5.3 / MelonLoader 1.5.1），第三方跨平台引用需用对应平台编译的 dll。 -->

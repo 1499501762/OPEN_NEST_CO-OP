@@ -1,0 +1,22 @@
+{
+  "Id": "selftest.05.scripted.reward",
+  "DisplayName": "自检5 脚本化模块/奖励",
+  "Description": "覆盖：Scripted 内置模块(print/requisition/shell/powder/log/announce，B6 无需注册) / Custom 节点(JSON 无回调，空跑通过) / AddRequisitionPoints / AddShell / AddPowderCharge / End。默认宿主对奖励仅日志不崩。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Scripted", "ModuleName": "print", "ModuleArgs": "{\"text\":\"[自检5] print 模块 OK\"}", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Scripted", "ModuleName": "requisition", "ModuleArgs": "{\"amount\":10}", "To": ["n4"] },
+    { "Id": "n4", "Kind": "Scripted", "ModuleName": "shell", "ModuleArgs": "{\"shell\":\"HE\",\"amount\":1}", "To": ["n5"] },
+    { "Id": "n5", "Kind": "Scripted", "ModuleName": "powder", "ModuleArgs": "{\"amount\":1}", "To": ["n6"] },
+    { "Id": "n6", "Kind": "Scripted", "ModuleName": "log", "ModuleArgs": "{\"note\":\"[自检5] log 模块 OK\"}", "To": ["n7"] },
+    { "Id": "n7", "Kind": "Scripted", "ModuleName": "announce", "ModuleArgs": "{\"title\":\"[自检5]\",\"text\":\"内置脚本模块 OK\"}", "To": ["n8"] },
+    { "Id": "n8", "Kind": "AddRequisitionPoints", "Value": 10, "To": ["n9"] },
+    { "Id": "n9", "Kind": "AddShell", "ShellId": "HE", "Value": 1, "To": ["n10"] },
+    { "Id": "n10", "Kind": "AddPowderCharge", "Value": 1, "To": ["n11"] },
+    { "Id": "n11", "Kind": "Custom", "To": ["n12"] },
+    { "Id": "n12", "Kind": "Print", "Message": "[自检5] 脚本模块 + 奖励 + Custom 全部 OK", "To": ["n13"] },
+    { "Id": "n13", "Kind": "End" }
+  ]
+}

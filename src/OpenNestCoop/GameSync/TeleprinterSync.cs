@@ -26,7 +26,17 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class TeleprinterSync : ISyncedModule
 {
-    public byte MsgType => 134;
+    public int MsgType => 134;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister()
+    {
+        CoopSyncRegistry.PendingRegister(false, () => new TeleprinterSync());
+        // ⚠️ 2026-09-04 中途加入快照：客机加入时主机开局 EvPrint 可能已发完（错过）+ EvState 无变化不广播
+        // → 客机开局简报永不同步（偶发）。注册快照：新成员加入时收到主机当前打字机文本。
+        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("teleprinter", BuildTeleprinterSnapshot, ApplyTeleprinterSnapshot));
+    }
     private const byte MsgTypeId = 134;
 
     // 事件类型（消息第二字节）
@@ -41,9 +51,41 @@ public sealed class TeleprinterSync : ISyncedModule
     private static int _log;
     private static int _stateDiag;   // Tick 状态诊断降频（每 20 次状态变化打一次）
     private static int _applyDiag;   // applied state 日志降频（每 10 次应用打一次）
+    private static int _evDiag;      // EvPrint 行内容诊断降频（空行/去重确认）
+    /// <summary>主机上次广播的打印行签名（ptype → lines 拼接）。2026-08-31 主机去重：游戏任务图重复触发
+    /// SubmitLines（同内容）→ 不再重复广播（否则客机 EvPrint 应用多次 → 打字机累积多换行）。</summary>
+    private static readonly System.Collections.Generic.Dictionary<byte, string> _lastPrintSig = new();
+    /// <summary>客机上次已应用的打印行签名（ptype → joined）。2026-09-05 去重修复：旧实现用
+    /// `tp._currentFullRich == joined` 判断"已打印"——但 _currentFullRich 是**完整累积文本**（EvState 维护），
+    /// 而 joined 是**本次新增行**（EvPrint 内容），两者语义不同 → 永远不相等 → 每次 EvPrint 都 SubmitLines
+    /// 排队 → 累积重复打印（"客机左打字机重复打字"根因之一）。改用独立字典记录已应用签名。</summary>
+    private static readonly System.Collections.Generic.Dictionary<byte, string> _lastAppliedPrintSig = new();
 
     // 状态同步：打字机类型 -> 最近一次完整富文本（检测变化）
     private readonly System.Collections.Generic.Dictionary<byte, string> _lastRich = new();
+    /// <summary>⚠️ 2026-09-12 开局偶发不同步修复（机制）：收到打字机事件时打字机对象**还没注册**
+    /// （`FindPrinter`→`Teleprinter.GetTeleprinter` 返回 null，任务场景加载中/加入时序）→ 旧实现
+    /// 只打 warning 直接 return **丢弃**；而 EvState 只在**文本变化**时广播（主机 `_lastRich` 已更新）
+    /// → 主机不会再发 → 客机开局简报**永久不同步**（偶发 = 完全取决于加入/场景加载时序）。
+    /// 修法：丢弃时按 ev+ptype 暂存**原始包字节**（只留最新一份），Tick 里每 0.25s 重试直到
+    /// 打字机出现后真正应用——纯本地重试，不增加任何网络流量。</summary>
+    private static readonly System.Collections.Generic.Dictionary<int, PendingTpEvent> _pendingTp = new();
+    private float _retryTimer;
+    /// <summary>⚠️ 2026-09-12 客机"卡在打印中"修复（实测日志：主机 isPrinting=False 而客机 printed=True
+    /// 持续 2 分钟）：客机自己的打字机若 `IsPrinting` 长期为 true（协程卡住/标记残留），
+    /// 旧实现 `keepLocalAnimation=true` 会**永远跳过**主机最终态（revealed/揭示遮罩/纸张位置/敲击状态）
+    /// → 客机揭示进度与纸张位置与主机不同步。这里记录每台打字机"上次揭示数变化时刻"，
+    /// 超过 StallSeconds 没变化 → 判定本地打印卡死 → 强制走最终态同步。</summary>
+    private static readonly System.Collections.Generic.Dictionary<byte, int> _revLast = new();
+    private static readonly System.Collections.Generic.Dictionary<byte, float> _revStamp = new();
+    private const float StallSeconds = 2f;
+    private sealed class PendingTpEvent
+    {
+        public byte Ev;
+        public byte Ptype;
+        public byte[] Raw;
+        public int Attempts;
+    }
     private float _stateTimer;
     private const float StateInterval = 0.5f;
     // ⚠️ 打印中高频广播间隔：打字机打印中 revealed 逐字增加，若用 0.5s 扫描会漏掉中间态
@@ -75,6 +117,11 @@ public sealed class TeleprinterSync : ISyncedModule
             // 取打印机类型（TeleprinterType）用于跨端定位同一台打字机
             byte ptype = 0;
             try { ptype = (byte)(int)printer.TeleprinterType; } catch { }
+            // ⚠️ 2026-08-31 主机去重：游戏任务图可能对同一内容重复触发 SubmitLines（日志：客机同一 EvPrint
+            // 应用 5 次 → 打字机多换行/累积）。相同 ptype + 相同行内容不重复广播（EvState 状态同步兜底对齐）。
+            string sig = string.Join("\n", lines);
+            if (_lastPrintSig.TryGetValue(ptype, out var lastSig) && lastSig == sig) return;
+            _lastPrintSig[ptype] = sig;
             var w = NetProtocol.Begin((MsgType)MsgTypeId);
             w.Put(EvPrint);
             w.Put(ptype);
@@ -197,13 +244,24 @@ public sealed class TeleprinterSync : ISyncedModule
     {
         var net = CoopRuntime.Net;
         if (net == null) return;
+        // ⚠️ 2026-09-12 开局偶发不同步修复（见 _pendingTp 注释）：重试那些"收到时打字机对象还不存在"
+        // 而暂存的事件。客户端也会跑（不能放在下面 `net.State != Hosting` 的早期返回之后）。
+        _retryTimer += dt;
+        if (_retryTimer >= 0.25f)
+        {
+            _retryTimer = 0f;
+            RetryPendingTeleprinter();
+        }
+        // ⚠️ 2026-09-05 移除快照延迟重发（RequestSnapshot）：它每 5s 触发主机重发**所有模块**快照
+        // （entity/maptoken/button 等），覆盖客机已同步状态 + 快照应用卡顿（"客机一卡一卡 + 同步有问题"）。
+        // 打字机开局兜底由 EvPrint（SubmitLines 事件）+ EvState（0.1~0.5s 状态扫描，文本变化即广播）负责，
+        // 无需快照重发。
         // 打印中高频扫描：任一打字机 IsPrinting 则用 0.1s 间隔捕获中间 reveal 序列，
         // 否则 0.5s 兜底。先扫一次判断（FindObjectsOfTypeAll 仅每帧一次判断成本可忽略，
         // 但避免重复扫描——用轻量标志缓存）。
         bool anyPrinting = _anyPrinting;
         if (!_anyPrinting || _printingCheckTimer <= 0f)
         {
-            _printingCheckTimer = 0.25f;
             try
             {
                 anyPrinting = false;
@@ -332,6 +390,10 @@ public sealed class TeleprinterSync : ISyncedModule
                 w.Put(paperOk ? (byte)1 : (byte)0);
                 w.Put(px); w.Put(py); w.Put(pz);
                 w.Put(animTyping ? (byte)1 : (byte)0);
+                // ⚠️ 2026-09-12：主机行游标/行数一并下发——客机“强制同步最终态”时对齐它，
+                // 修“后续新任务的换行/打字针起始位置错”（行游标是打字机内部状态，之前没同步）。
+                try { w.Put(tp.CurrentLineCount); } catch { w.Put(0); }
+                try { w.Put(tp._prevLineNum); } catch { w.Put(0); }
                 var data = NetProtocol.Snapshot(w);
                 if (net.IsHost)
                 {
@@ -365,12 +427,12 @@ public sealed class TeleprinterSync : ISyncedModule
                 // 不本地 Apply——Apply 会 DrainAllJobsInstant/停协程/设文本 → 主机打字机卡住。
                 return;
             }
-            Apply(ev, ptype, r);
+            Apply(ev, ptype, r, data);
         }
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"TeleprinterSync OnPacket: {ex.Message}"); }
     }
 
-    private static void Apply(byte ev, byte ptype, NetDataReader r)
+    private static void Apply(byte ev, byte ptype, NetDataReader r, byte[] raw)
     {
         try
         {
@@ -386,22 +448,39 @@ public sealed class TeleprinterSync : ISyncedModule
                         var lines = new System.Collections.Generic.List<string>(n);
                         for (int i = 0; i < n; i++)
                             lines.Add(r.GetString());
-                        if (tp == null) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply print but printer null ptype={ptype}"); return; }
-                        // 防重复打印（2026-08-15）：客机本地任务图/同 seed 也会打印初始任务文本，
-                        // 主机 EvPrint 再复现 → 打字机"多打一份"（初始文本双份）。若打印机当前完整富文本
-                        // 已等于本次行文本 → 本地已打印同内容，跳过复现（子任务新文本不匹配 → 正常复现）。
+                        if (tp == null) { StashTp(ev, ptype, raw, "print"); return; }
+                        string joined = ""; // case 级作用域（供去重 + 诊断）
+                        // 防重复打印（2026-09-05 重写）：用独立 _lastAppliedPrintSig 字典去重。
+                        // ⚠️ 旧实现用 `tp._currentFullRich == joined` 判断"已打印"——但 _currentFullRich 是
+                        // **完整累积文本**（EvState 维护），joined 是**本次新增行**，两者语义不同 → 永远
+                        // 不相等 → 每次 EvPrint 都 SubmitLines 排队 → 累积重复（"客机左打字机重复打字"）。
+                        // 相同内容（网络重发/转发重复）已应用过 → 跳过。
                         try
                         {
-                            string joined = string.Join("\n", lines).Trim();
+                            joined = string.Join("\n", lines).Trim();
                             string curRich = (tp._currentFullRich ?? "").Trim();
-                            if (curRich.Length > 0 && curRich == joined)
+                            // ⚠️ 2026-08-26 空行诊断：打印本次行内容（含空行数）——用户"打字机异常空行"：
+                            // 确认空行是内容自带（lines 含 "" 空行）还是累积（多份 EvPrint 叠加）。
+                            if ((++_evDiag % 5) == 1)
                             {
-                                CoopLog.Debug("Teleprinter.skip", () => $"[Teleprinter] skip print (already shown) ptype={ptype} n={n}");
+                                try
+                                {
+                                    int empty = 0;
+                                    for (int ei = 0; ei < lines.Count; ei++)
+                                        if (string.IsNullOrEmpty(lines[ei])) empty++;
+                                    string preview = joined.Length > 80 ? joined.Substring(0, 80) : joined;
+                                    CoopRuntime.LogSource?.LogInfo($"[Teleprinter] EvPrint n={n} empty={empty} len={joined.Length} curRichLen={curRich.Length} dup={_lastAppliedPrintSig.TryGetValue(ptype, out var d) && d == joined} prev='{preview.Replace("\n", "\\n")}'");
+                                }
+                                catch { }
+                            }
+                            if (_lastAppliedPrintSig.TryGetValue(ptype, out var lastApplied) && lastApplied == joined)
+                            {
+                                CoopLog.Debug("Teleprinter.skipDup", () => $"[Teleprinter] skip dup print ptype={ptype} n={n}");
                                 break;
                             }
+                            _lastAppliedPrintSig[ptype] = joined;
                         }
                         catch { }
-                        // 复现打印：把行文本逐个交给打字机（SubmitLines 需要 IEnumerable<string>）。
                         // interop 签名是 Il2CppSystem.Collections.Generic.IEnumerable<string>。
                         // ⚠️ 客机打字机动画/类型名根因与修复（2026-08-13，已确认正常）：
                         // 1) 无动画：旧实现反射 Invoke 传 Il2Cpp List → List→IEnumerable 运行时转换失败
@@ -410,6 +489,17 @@ public sealed class TeleprinterSync : ISyncedModule
                         // 2) 类型名：根因在主机侧 PostTeleprinterPrint 用非泛型 IEnumerable 提取失败 →
                         //    ToString 类型名广播（已修，HarmonyPatches）。客机侧 Il2Cpp List Add(托管string)
                         //    会被装箱成 Object → 元素变类型名，故用 Il2CppSystem.String 隐式转换后 Add。
+                        // ⚠️ 2026-09-12：本机这台已卡死（揭示数冻结 ≥StallSeconds）→ 先靶向复位，否则新任务
+                        // 排在坏任务后面（用户实测：后续任务的打字针起始位置/动画状态/换行全错）。
+                        try
+                        {
+                            int curRevPre = 0; bool revOkPre = false;
+                            try { curRevPre = tp._currentRevealedCharIndex; revOkPre = true; } catch { }
+                            if (revOkPre && tp.IsPrinting && _revLast.TryGetValue(ptype, out var lrPre) && lrPre == curRevPre
+                                && _revStamp.TryGetValue(ptype, out var stPre) && UnityEngine.Time.time - stPre > StallSeconds)
+                                ResetLocalRunState(tp, ptype, "pre-print");
+                        }
+                        catch { }
                         try
                         {
                             var il2cppLines = new Il2CppSystem.Collections.Generic.List<string>();
@@ -433,10 +523,13 @@ public sealed class TeleprinterSync : ISyncedModule
                                     // 兜底：若游戏从 val 生成的 job.lines 异常（类型名），用正确行替换
                                     if (job != null)
                                     {
+                                        // ⚠️ 2026-09-12：**无条件**用正确行覆盖 job.lines（旧实现在首行以
+                                        // "Il2CppSystem." 开头时才修——但 TryCast 接口对象被游戏 ToString() 的
+                                        // 结果是整个文本变成类型名，首行未必命中 → 动画中显示类型名/长度错）。
                                         try
                                         {
                                             var jl = job.lines;
-                                            if (jl != null && jl.Count > 0 && (jl[0] ?? "").StartsWith("Il2CppSystem.", StringComparison.Ordinal))
+                                            if (jl != null)
                                             {
                                                 jl.Clear();
                                                 foreach (var s in lines)
@@ -456,11 +549,18 @@ public sealed class TeleprinterSync : ISyncedModule
                             // 启动打印动画：SubmitLines 排队后需 TryStart 才启动逐字打印
                             // （revealed 逐字增加 + 打字针敲击）。打字机可能已被任务触发打印。
                             try { tp.TryStart(true); } catch { }
-                            // 诊断：打字机打印动画是否启动（降频，每 10 次打一次）
+                            // ⚠️ 2026-09-12：新一次打印 → 重置卡死检测基准（下一帧揭示数从 0 开始前进）
+                            try { _revLast.Remove(ptype); _revStamp[ptype] = UnityEngine.Time.time; } catch { }
+                            // ⚠️ 2026-09-05 移除 `tp._currentFullRich = joined`：旧实现把 _currentFullRich
+                            // 覆盖成**本次新增行**，而 EvState 又恢复**完整累积文本** → 底本反复切换
+                            // （72 ↔ 1135）→ 打字机重复打印/文本错乱（"客机左打字机重复打字"根因）。
+                            // _currentFullRich 应由 EvState 唯一维护（完整文本）；去重改用
+                            // _lastAppliedPrintSig（见上方）。
+                            // 诊断：打字机打印动画是否启动（每 2s 打一次——确认开局 print 应用后 isPrinting，
+                            // "客机开局不打字"需确认 SubmitLines+TryStart 后动画是否真正启动）
                             try
                             {
-                                if ((++_applyDiag % 10) == 7)
-                                    CoopLog.Debug("Teleprinter.afterPrint", () => $"[Teleprinter] after print ptype={ptype} isPrinting={tp.IsPrinting} revealed={tp._currentRevealedCharIndex} isRunning={tp._isRunning}");
+                                CoopLog.Info("Teleprinter.afterPrint", () => $"[Teleprinter] after print ptype={ptype} isPrinting={tp.IsPrinting} revealed={tp._currentRevealedCharIndex} isRunning={tp._isRunning}", 2f);
                             }
                             catch { }
                         }
@@ -472,7 +572,7 @@ public sealed class TeleprinterSync : ISyncedModule
                     {
                         bool prepend = r.GetByte() != 0;
                         string chunk = r.GetString();
-                        if (tp == null) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply append but printer null ptype={ptype}"); return; }
+                        if (tp == null) { StashTp(ev, ptype, raw, "append"); return; }
                         try { tp.AppendInstant(chunk ?? "", prepend); }
                         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply append: {ex.Message}"); }
                         CoopLog.Debug("Teleprinter.appliedAppend", () => $"[Teleprinter] applied append prepend={prepend} ptype={ptype} chunk='{Truncate(chunk)}'");
@@ -486,15 +586,18 @@ public sealed class TeleprinterSync : ISyncedModule
                         bool paperOk = false;
                         float px = 0f, py = 0f, pz = 0f;
                         bool animTyping = false;
+                        int hostLineCount = -1, hostPrevLine = -1;   // 主机行游标/行数（旧包缺字段=-1，不覆盖）
                         try
                         {
                             if (r.AvailableBytes >= 4) revealed = r.GetInt();
                             if (r.AvailableBytes >= 1) paperOk = r.GetByte() != 0;
                             if (r.AvailableBytes >= 12) { px = r.GetFloat(); py = r.GetFloat(); pz = r.GetFloat(); }
                             if (r.AvailableBytes >= 1) animTyping = r.GetByte() != 0;
+                            if (r.AvailableBytes >= 4) hostLineCount = r.GetInt();
+                            if (r.AvailableBytes >= 4) hostPrevLine = r.GetInt();
                         }
                         catch { }
-                        if (tp == null) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply state but printer null ptype={ptype}"); return; }
+                        if (tp == null) { StashTp(ev, ptype, raw, "state"); return; }
                         // 打字机是否正在打印（EvPrint 触发的逐字打印动画）。
                         // ⚠️ 修复（2026-08-13）：打印中**不要**无条件 DrainAllJobsInstant/停协程——
                         // 那会停掉客机打字机自身的逐字动画，而 EvState 只同步最终态 revealed → 动画消失
@@ -505,12 +608,85 @@ public sealed class TeleprinterSync : ISyncedModule
                         // 仅在打字机**空闲**（打印完成/未启动）时才强制同步最终态（内容兜底）。
                         bool printing = false;
                         try { printing = tp.IsPrinting; } catch { }
-                        bool keepLocalAnimation = printing;
-                        // ⚠️ 修复（2026-08-13）：**无论打印中还是空闲，都设 _currentFullRich = 主机正确内容**。
-                        // 打字机协程逐字揭示的底本就是 _currentFullRich——若打印中不设，它停留在
-                        // SubmitLines 时游戏写入的值：TryCast 接口对象被游戏 ToString() 成
-                        // 'Il2CppSystem.Collections.Generic.IEnumerable`1[System.String]' → 动画中显示类型名。
-                        // 设 _currentFullRich 不破坏动画（reveal/mask 由协程驱动，逐字揭示照常）。
+                        // ⚠️ 2026-09-12（三修）：判据改为“**本机揭示数是否真的在前进**”：
+                        //  - 在前进（健康本地动画）→ 不写状态，让本机协程自己逐字打（平滑）；
+                        //  - 不前进（协程已死/卡住，而 `IsPrinting` 仍为 true——实测右侧那台就是这样）→
+                        //    不再当作“动画中”，改由主机状态驱动（每个 EvState 写一次文本/揭示数/遮罩/纸张）
+                        //    → 那台也会“跟着主机逐字显示”，不会再一直空白。
+                        bool animating = false;
+                        if (printing)
+                        {
+                            int curRevNow = 0;
+                            bool revOk = false;
+                            try { curRevNow = tp._currentRevealedCharIndex; revOk = true; } catch { }
+                            if (!revOk) animating = true; // 读不到就不干预
+                            else if (_revLast.TryGetValue(ptype, out var lastRev) && lastRev == curRevNow)
+                            {
+                                animating = false; // 与上次相同 = 没前进 → 本地动画已死
+                                float nowD = 0f;
+                                try { nowD = UnityEngine.Time.time; } catch { }
+                                if (_revStamp.TryGetValue(ptype, out var stD) && nowD - stD > StallSeconds)
+                                    LogTpStuck(tp, ptype, "dead-anim");
+                            }
+                            else
+                            {
+                                animating = true;
+                                _revLast[ptype] = curRevNow;
+                                try { _revStamp[ptype] = UnityEngine.Time.time; } catch { }
+                            }
+                        }
+                        else
+                        {
+                            _revLast.Remove(ptype);
+                            _revStamp.Remove(ptype);
+                        }
+                        bool keepLocalAnimation = animating;
+                        // ⚠️ 2026-09-04 中途新文本无动画修复：空闲（非打印）+ 文本变化（含开局无旧文本）→
+                        // 用 SubmitLines + TryStart 触发逐字动画（否则下面直接设 tmp.text → 文本瞬间出现无动画）。
+                        // ⚠️ 2026-09-05 修正：**只有主机"还在打字"（animTyping=true）时才触发 fallback**。
+                        // 主机已打印完（animTyping=false，如中途加入/OnLateJoin 强制广播时 revealed 已是最终态）→
+                        // 不触发 fallback → keepLocalAnimation 保持 false → 走下方 revealed/_revealMask 完整状态
+                        // 同步。旧实现无条件 fallback → keepLocalAnimation=true → 跳过 revealed/mask → 客机从头
+                        // 逐字打印，但纸张已同步到底部 → 打字针/纸张/揭示进度错位（"保底只同步内容没同步动画
+                        // 机构"根因）。
+                        string oldRichForAnim = "";
+                        try { oldRichForAnim = tp._currentFullRich ?? ""; } catch { }
+                        if (!printing && !string.IsNullOrEmpty(rich) && oldRichForAnim != rich && animTyping)
+                        {
+                            try
+                            {
+                                var animLines = rich.Split('\n');
+                                var il2cppAnim = new Il2CppSystem.Collections.Generic.List<string>();
+                                foreach (var s in animLines)
+                                {
+                                    try { Il2CppSystem.String ilstr = s ?? ""; il2cppAnim.Add(ilstr); } catch { }
+                                }
+                                var animVal = ((Il2CppObjectBase)il2cppAnim)
+                                    .TryCast<Il2CppSystem.Collections.Generic.IEnumerable<string>>();
+                                if (animVal != null)
+                                {
+                                    try { tp.SubmitLines("", animVal, null, false); } catch { }
+                                    try { tp.TryStart(true); } catch { }
+                                    keepLocalAnimation = true; // 逐字动画已由 SubmitLines 协程启动
+                                    CoopLog.Info("Teleprinter.animFallback", () => $"[Teleprinter] state→SubmitLines anim fallback ptype={ptype} richLen={rich.Length}", 2f);
+                                }
+                            }
+                            catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] anim fallback: {ex.Message}"); }
+                        }
+                        // ⚠️ 2026-09-12 关键：本地协程正在逐字打印（keepLocalAnimation）→ **一律不写**打字机内部
+                        // 状态/视觉（底本/文本/揭示数/遮罩/纸张/打字针）。
+                        // 实测根因：旧实现每 0.1s 覆写 `_currentFullRich`/`_tmp.text`/`revealed`/`_revealMask`/纸张，
+                        // 与本地协程**互相打架** → 协程冻在半路（STUCK 日志：rev=714 冻结、主机已 900+）
+                        // → 之后被“强制同步最终态”兜掉 → 后续任务的打字针/换行/动画状态全错。
+                        // 只在空闲（未在本地动画）时才写完整最终态；卡死时走上方的“重起打印”路径。
+                        if (keepLocalAnimation)
+                        {
+                            if ((++_applyDiag % 10) == 1)
+                                CoopLog.Debug("Teleprinter.appliedState", () => $"[Teleprinter] applied state ptype={ptype} keepAnim=True（本地动画中，不写状态）");
+                            break;
+                        }
+                        // （非动画态）设底本 + 显示文本：底本必须与显示文本一致（否则动画中会显示
+                        // TryCast 类型名 / 未揭示部分错位）。
                         try { tp._currentFullRich = rich; } catch { }
                         // 设置显示文本（GetTmpText 优先反射 _tmp 字段，兜底子物体 TMP_Text）
                         bool tmpSet = false;
@@ -522,13 +698,18 @@ public sealed class TeleprinterSync : ISyncedModule
                                 var textProp = tmpObj.GetType().GetProperty("text");
                                 if (textProp != null)
                                 {
-                                    // ⚠️ 打印中也设 _tmp.text = 主机正确内容：SubmitLines 时游戏可能把
-                                    // TryCast 接口对象 ToString 成类型名写进 _tmp.text → 打字机显示类型名。
-                                    // 设 _tmp.text = 正确 rich 不破坏动画（reveal/mask 由打字机协程逐字驱动）。
+                                    // ⚠️ 2026-08-26 打字机空白修复：**打印中也设 _tmp.text = 主机内容**。
+                                    // 之前改成"打印中（keepLocalAnimation）不设 _tmp.text"（为避免打字针/文本
+                                    // 偏移）——但客机打字机若 IsPrinting=true 而协程没真正揭示（reveal 卡住），
+                                    // tmp.text 一直不设 → 打字机空白（"客机打字机有一台空白"根因）。
+                                    // 打字针/文本偏移的真正根因是**累积打印多份**（revealed 909 vs 单份 463）——
+                                    // 已由 EvPrint 去重（_currentFullRich = joined）解决；累积消除后单份
+                                    // tmp.text 与打字机 reveal 匹配（揭示部分可见、未揭示隐藏），不偏移。
+                                    // 打印中设 tmp.text 不破坏动画（reveal/mask 由打字机协程逐字驱动）。
                                     textProp.SetValue(tmpObj, rich);
                                     tmpSet = true;
                                     if ((_applyDiag % 10) == 3)
-                                        CoopLog.Debug("Teleprinter.tmpText", () => $"[Teleprinter] set tmp.text ok (obj={tmpObj.GetType().Name}) keepAnim={keepLocalAnimation}");
+                                        CoopLog.Debug("Teleprinter.tmpText", () => $"[Teleprinter] set tmp.text ok (obj={tmpObj.GetType().Name}) keepAnim={keepLocalAnimation} len={rich.Length}");
                                 }
                             }
                             catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] set tmp.text: {ex.Message}"); }
@@ -546,8 +727,17 @@ public sealed class TeleprinterSync : ISyncedModule
                             // 驱动（EvPrint SubmitLines 启动），这里仅作空闲时的最终态兜底。
                             int curRev = 0;
                             try { curRev = tp._currentRevealedCharIndex; } catch { }
-                            targetRev = Math.Max(curRev, revealed);
+                            // ⚠️ 2026-09-12：**换新文本**（底本不同）→ 揭示数必须跟随主机（从 0 重新逐字），
+                            // 否则 max(旧值, 新值) 会把新文本一上来就整段显示（无动画）。
+                            targetRev = (oldRichForAnim != rich) ? revealed : Math.Max(curRev, revealed);
                             try { tp._currentRevealedCharIndex = targetRev; } catch { }
+                            // ⚠️ 2026-09-12：写下揭示数后同步更新基准——本机协程已死时，本模块就是“动画驱动者”，
+                            // 下一个状态包应继续跟随（否则会写一次跳一次，跟随变 5Hz 抖动）。
+                            try { _revLast[ptype] = targetRev; } catch { }
+                            // 行游标/行数对齐主机（否则后续新任务的换行/打字针起始位置会错——用户实测）：
+                            // 这两个是打字机内部的“行计数”，只靠文本/揭示数/纸张位置无法恢复。
+                            try { if (hostPrevLine >= 0) tp._prevLineNum = hostPrevLine; } catch { }
+                            try { if (hostLineCount >= 0) tp._CurrentLineCount_k__BackingField = hostLineCount; } catch { }
                             // 重建逐字揭示遮罩（前 targetRev 个 true，打字动画显示"打字进度"）
                             try
                             {
@@ -631,6 +821,73 @@ public sealed class TeleprinterSync : ISyncedModule
         catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"TeleprinterSync Apply: {ex.Message}"); }
     }
 
+    /// <summary>用主机文本在本机重新起一次“逐字打印”（用于卡死自愈）。
+    /// 用户症状“右侧空白、没有任何动画”——只清状态不够，必须重起一次打印才有动画。</summary>
+    private static bool TryRestartPrint(Teleprinter tp, byte ptype, string rich)
+    {
+        if (tp == null || string.IsNullOrEmpty(rich)) return false;
+        try
+        {
+            var lines = rich.Split('\n');
+            var il = new Il2CppSystem.Collections.Generic.List<string>();
+            foreach (var s in lines) { try { Il2CppSystem.String ilstr = s ?? ""; il.Add(ilstr); } catch { } }
+            var val = ((Il2CppObjectBase)il).TryCast<Il2CppSystem.Collections.Generic.IEnumerable<string>>();
+            if (val == null) return false;
+            var job = tp.SubmitLines("", val, null, false);
+            try
+            {
+                if (job != null && job.lines != null)
+                {
+                    job.lines.Clear();
+                    foreach (var s in lines) { Il2CppSystem.String ilstr = s ?? ""; job.lines.Add(ilstr); }
+                }
+            }
+            catch { }
+            try { tp.TryStart(true); } catch { }
+            _revLast.Remove(ptype);
+            _revStamp[ptype] = UnityEngine.Time.time;
+            CoopLog.Info("Teleprinter.restart", () => $"[Teleprinter] restart print ptype={ptype} len={rich.Length} lines={lines.Length}", 1f);
+            return true;
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] restart print: {ex.Message}"); return false; }
+    }
+
+    /// <summary>定向复位本地打字机的**运行状态**（不用游戏自带 ForceCompleteAll/DrainAllJobsInstant）：
+    /// 停掉本机卡住的打印协程 + 清空积压任务队列 + `_isRunning=false`。
+    /// ⚠️ 只用严格卡死门槛调用（本机揭示数冻结 + 主机已超过本机）；健康动画不会被碰到。</summary>
+    private static void ResetLocalRunState(Teleprinter tp, byte ptype, string why)
+    {
+        if (tp == null) return;
+        try { var r = tp._runner; if (r != null) tp.StopCoroutine(r); } catch { }
+        try { tp._runner = null; } catch { }
+        try { tp._isRunning = false; } catch { }
+        try { if (tp._pendingJobs != null) tp._pendingJobs.Clear(); } catch { }
+        _revLast.Remove(ptype);
+        _revStamp.Remove(ptype);
+        CoopLog.Info("Teleprinter.reset", () => $"[Teleprinter] local run-state reset ({why}) ptype={ptype}", 1f);
+    }
+
+    /// <summary>记录“这台打字机卡死了”的完整内部状态（**只诊断、不改**）。
+    /// ⚠️ 2026-09-12 二修：旧版这里调 `ForceCompleteAll()`/`DrainAllJobsInstant()` 想“干净收尾”，
+    /// 实测**彻底破坏打字动画**（后续打印全部不再逐字）——已改回纯记录。
+    /// 诊断字段（供下一轮定位“强制同步不完全”到底漏了哪个内部状态）：任务队列/协程/行游标/纸张基线。</summary>
+    private static void LogTpStuck(Teleprinter tp, byte ptype, string why)
+    {
+        if (tp == null) return;
+        string diag = "";
+        try { diag += $" isRunning={tp._isRunning}"; } catch { }
+        try { diag += $" hasJobs={tp.HasJobs}"; } catch { }
+        try { diag += $" printing={tp.IsPrinting}"; } catch { }
+        try { diag += $" lineCount={tp.CurrentLineCount}"; } catch { }
+        try { diag += $" prevLine={tp._prevLineNum}"; } catch { }
+        try { diag += $" rev={tp._currentRevealedCharIndex}"; } catch { }
+        try { diag += $" fullRichLen={(tp._currentFullRich ?? "").Length}"; } catch { }
+        try { diag += $" maskCount={(tp._revealMask == null ? -1 : tp._revealMask.Count)}"; } catch { }
+        try { diag += $" baselineSet={tp._baselineSet} baselineY={tp._baselineWorldY:0.00}"; } catch { }
+        try { diag += $" animTyping={tp._animTypingState}"; } catch { }
+        CoopLog.Info("Teleprinter.stuck", () => $"[Teleprinter] STUCK ({why}) ptype={ptype}{diag}", 5f);
+    }
+
     /// <summary>获取打字机显示文本对象（TMP_Text）：优先反射 _tmp 字段，失败则从子物体找 TMP_Text。</summary>
     private static object GetTmpText(Teleprinter tp)
     {
@@ -678,13 +935,132 @@ public sealed class TeleprinterSync : ISyncedModule
         catch { return null; }
     }
 
+    /// <summary>⚠️ 2026-09-12 开局偶发不同步修复：把"打字机对象还不存在"的事件暂存（只留最新一份）。</summary>
+    private static void StashTp(byte ev, byte ptype, byte[] raw, string what)
+    {
+        try
+        {
+            if (raw == null) return;
+            CoopRuntime.LogSource?.LogWarning($"[Teleprinter] apply {what} but printer null ptype={ptype} → 暂存待打字机注册后重试");
+            _pendingTp[ev * 256 + ptype] = new PendingTpEvent { Ev = ev, Ptype = ptype, Raw = raw };
+        }
+        catch { }
+    }
+
+    /// <summary>⚠️ 2026-09-12：重试暂存的打字机事件（打字机注册后真正应用）。
+    /// 上限 240 次×0.25s = 60s（场景一直没打字机就放弃，避免无界堆积）。</summary>
+    private static void RetryPendingTeleprinter()
+    {
+        if (_pendingTp.Count == 0) return;
+        System.Collections.Generic.List<int> drop = null;
+        foreach (var kv in _pendingTp)
+        {
+            var pe = kv.Value;
+            if (pe == null || pe.Raw == null) { (drop ??= new System.Collections.Generic.List<int>()).Add(kv.Key); continue; }
+            bool found;
+            try { found = FindPrinter(pe.Ptype) != null; } catch { found = false; }
+            if (!found)
+            {
+                if (++pe.Attempts > 240)
+                {
+                    CoopRuntime.LogSource?.LogWarning($"[Teleprinter] 暂存事件超时放弃 ev={pe.Ev} ptype={pe.Ptype}");
+                    (drop ??= new System.Collections.Generic.List<int>()).Add(kv.Key);
+                }
+                continue;
+            }
+            (drop ??= new System.Collections.Generic.List<int>()).Add(kv.Key);
+            try
+            {
+                var rr = new NetDataReader(pe.Raw);
+                rr.GetByte(); // 消息类型
+                byte ev = rr.GetByte();
+                byte pt = rr.GetByte();
+                CoopRuntime.LogSource?.LogInfo($"[Teleprinter] retry stashed ev={ev} ptype={pt}（打字机已注册）");
+                Apply(ev, pt, rr, pe.Raw);
+            }
+            catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[Teleprinter] retry apply: {ex.Message}"); }
+        }
+        if (drop != null)
+            foreach (var k in drop) _pendingTp.Remove(k);
+    }
+
     private static string Truncate(string s, int max = 240)
     {
         if (string.IsNullOrEmpty(s)) return "";
         return s.Length <= max ? s : s.Substring(0, max) + "…";
     }
 
+    // ---------------- 中途加入快照（StateSnapshotSync "teleprinter"） ----------------
+
+    /// <summary>中途加入：主机读所有打字机的完整富文本（_currentFullRich）打包。</summary>
+    private static byte[] BuildTeleprinterSnapshot()
+    {
+        try
+        {
+            var printers = UnityEngine.Object.FindObjectsOfType<Teleprinter>(true);
+            if (printers == null || printers.Length == 0) return null;
+            var w = NetProtocol.Begin((MsgType)MsgTypeId);
+            w.Put((byte)printers.Length);
+            foreach (var tp in printers)
+            {
+                if (tp == null) continue;
+                byte ptype = 0;
+                try { ptype = (byte)(int)tp.TeleprinterType; } catch { }
+                string rich = "";
+                try { rich = tp._currentFullRich ?? ""; } catch { }
+                w.Put(ptype);
+                w.Put(rich);
+            }
+            return NetProtocol.Snapshot(w);
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"TeleprinterSync BuildSnapshot: {ex.Message}"); return null; }
+    }
+
+    /// <summary>中途加入：新成员应用打字机文本（设 _currentFullRich + 显示文本，开局简报同步，无需逐字动画）。</summary>
+    private static void ApplyTeleprinterSnapshot(byte[] data)
+    {
+        try
+        {
+            var r = new NetDataReader(data);
+            r.GetByte(); // 跳过类型
+            int n = r.GetByte();
+            IsApplying = true;
+            try
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    byte ptype = r.GetByte();
+                    string rich = r.GetString();
+                    var tp = FindPrinter(ptype);
+                    if (tp == null) continue;
+                    try { tp._currentFullRich = rich; } catch { }
+                    var tmpObj = GetTmpText(tp);
+                    if (tmpObj != null)
+                    {
+                        try
+                        {
+                            var textProp = tmpObj.GetType().GetProperty("text");
+                            if (textProp != null) textProp.SetValue(tmpObj, rich);
+                        }
+                        catch { }
+                    }
+                    CoopLog.Info("Teleprinter.snapshot", () => $"[Teleprinter] snapshot applied ptype={ptype} len={rich?.Length ?? 0}", 2f);
+                }
+            }
+            finally { IsApplying = false; }
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"TeleprinterSync ApplySnapshot: {ex.Message}"); }
+    }
+
     public void OnSessionStarted() { }
     public void OnSessionEnded() { Reset(); }
-    public void Reset() { }
+    public void Reset() { _lastRich.Clear(); _pendingTp.Clear(); _retryTimer = 0f; _revLast.Clear(); _revStamp.Clear(); }
+
+    /// <summary>⚠️ 2026-09-05 新成员加入：重置 _lastRich → 下次 Tick（0.1~0.5s）强制广播当前打字机文本。
+    /// 修复"开局偶发无同步"：快照 len=0（新成员加入时主机文本未生成）+ EvState 只在文本变化时广播 →
+    /// 新成员加入后主机文本若已稳定（无变化）则永远不广播 → 客机开局简报缺失。</summary>
+    public void OnLateJoin(ulong steamId)
+    {
+        try { _lastRich.Clear(); } catch { }
+    }
 }

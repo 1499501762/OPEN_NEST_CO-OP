@@ -4,6 +4,62 @@
 > 关键属性（来自 dump_Assembly-CSharp.txt）与同步消息格式。2026-08-22 整理。
 >
 > **关联**：`docs/INTERACTABLES.md`（实体术语表）、`docs/DECOUPLING.md`（解耦状态）。
+>
+> **更新记录**：
+> - 2026-09-12（六）**修正上一版导致的“右侧一直空白”**（用户实测）：上一版“本地动画期间一律不写”的判据是
+>   `IsPrinting`，但实测**本机协程已死而 `IsPrinting` 仍为 true** → 永远不写 → 一直空白。
+>   判据改为“**本机揭示数是否真的在前进**”：
+>   ① 在前进（健康本地动画）→ 不写状态，让本机协程自己逐字打（平滑，与旧版左机体验一致）；
+>   ② 不前进（协程已死/卡住）→ 不再当作“动画中”，**改由主机状态驱动**（每个 EvState 写一次文本/揭示数/
+   遮罩/纸张/打字针）→ 该台会“跟着主机逐字显示”，不再空白；同时写下揭示数后同步更新基准，
+>   使下一个包继续跟随（否则会写一次跳一次，跟随变 5Hz 抖动）。
+>   ③ 另修：**换新文本**（底本不同）时揭示数必须跟随主机（从 0 重新逐字）——旧版 `max(旧值,新值)` 会把
+>   新文本一上来就整段显示（无动画）。
+> - 2026-09-12（五）**定位到“本地打印任务一开始就死”的根因**：双端日志对比——主机右侧（ptype=1）**正常打印完**
+>   （`state ptype=1 isPrinting=False revealed=463 maskCount=463`）；客机 `applied print n=17 ptype=1` 后
+>   `after print ptype=1 isPrinting=True revealed=0 isRunning=True` —— **打印启动了但揭示数一直 0（无动画）**，
+>   随后 `IsPrinting` 变回 False → 直接跳到最终态 `revealed=463`（旧兵底强制同步）。
+>   上一版加的严格门槛 `STUCK` 未触发（因为它是“任务已静默结束”而非“卡在中途”）。
+>   最可能使本地任务死掉的就是**我们每 0.1s 覆写内部字段与协程打架**（与之前 STUCK 那次 rev 冻在 714 同一现象）。
+>   修法：①**本地动画期间（`keepLocalAnimation`）一律不写**打字机内部状态/视觉（底本/文本/揭示数/遮罩/
+>   纸张/打字针），只在空闲时写完整最终态；②卡死时用主机文本**重起一次本地动画打印**（`TryRestartPrint`，
+>   不只是清状态）→ 这台才有动画；③`EvPrint` 提交新任务前若本机已卡死 → 先定向复位（新任务不排在坏任务后）；
+>   ④`job.lines` **无条件**用正确行覆盖（旧版只在首行以 `Il2CppSystem.` 开头时修 → 类型名/长度会错）。
+> - 2026-09-12（四）**拿到卡死现场 + 改为严格门槛的定向复位**：实测日志（一次中打印中卡死）
+>   `[Teleprinter] STUCK (stall) ptype=1 isRunning=True hasJobs=True printing=True lineCount=35 prevLine=0
+>   rev=714 fullRichLen=935 maskCount=779 baselineSet=True baselineY=0.29 animTyping=True`
+>   → 本机协程还在跑（`_runner`/`_isRunning`/`_pendingJobs` 非空）但揭示数冻在 714（主机已领先）。
+>   修法：①卡死判定加**严格门槛**——必顶“主机揭示数 > 本机揭示数”（健康动画每秒都在前进，不会被误判）；
+>   ②新增 `ResetLocalRunState()`：**只**停本机打印协程（`StopCoroutine(_runner)`）+ 清 `_pendingJobs` +
+>   `_isRunning=false`，**不碰** `ForceCompleteAll`/`DrainAllJobsInstant`；③`EvState` 包**追加主机行游标**
+>   （`CurrentLineCount` + `_prevLineNum`），客机强制同步最终态时一并对齐 → 修“后续新任务的换行/打字针起始位置错”。
+> - 2026-09-12（三）**撤销“强制收尾”**（用户实测：“打字机打字动画完全被破坏了”）：上一版用游戏自带
+>   `ForceCompleteAll()`/`DrainAllJobsInstant()` 做“干净收尾”，实测会把**后续所有打印的逐字动画全部弄没**
+>   （已从代码与 DLL 中完全移除，含 `IsStalled`/`CompleteLocally` 与三处调用）。
+>   现改为**纯诊断** `LogTpStuck()`（只记录、不改）：`[Teleprinter] STUCK (why) ptype=.. isRunning=.. hasJobs=..
+>   printing=.. lineCount=.. prevLine=.. rev=.. fullRichLen=.. maskCount=.. baselineSet=.. baselineY=.. animTyping=..`
+>   ——用于下一轮定位“强制同步不完全”到底漏了哪个内部状态（任务队列/协程/行游标/纸张基线），再靶向修。
+>   强制同步最终态（文本/揭示数/遮罩/纸张/打字针）本身保留不变。
+> - 2026-09-12（二）**卡死“强制同步最终态”改为完整收尾**（用户实测：“开局右侧一台空白、无任何动画，
+>   然后被打字完的补发强制同步同步掉了，但强制同步不完全导致后续后发的打字任务的打字针起始位置/动画状态/
+>   换行都错误”）。根因：旧实现只写视觉状态（`_currentFullRich`/`_tmp.text`/`revealed`/`_revealMask`/
+>   `paperTransform`/打字针 bool）——但打字机内部还有 **`_pendingJobs` 任务队列 / `_runner` 协程 /
+>   行游标（`_prevLineNum`/`CurrentLineCount`）/ 纸张基线（`_baselineSet`/`_baselineWorldY`）** 没复位，
+>   坏任务会一直堵在队列里 → 新任务排在它后面 → 打字针起始位置/动画状态/换行全错。
+>   修法（本版）：①新增 `CompleteLocally()`——用**游戏自带** `ForceCompleteAll()`（失败时退 `DrainAllJobsInstant()`）
+>   干净收尾 + 清空 `_pendingJobs` + `_isRunning=false` + 清卡死基准；②`EvState` 卡死分支不再只设
+>   `keepLocalAnimation=false`，而是先 `CompleteLocally` 再写最终态；③`EvPrint` 提交**前**如果本地已卡死，
+>   先 `CompleteLocally`（否则新任务排在坏任务后面）；④`Tick` 新增**客机侧卡死自愈**
+>   （`net.State==Joined` + 揭示数超时未前进 → `CompleteLocally`），不依赖主机状态包。
+>   诊断：`[Teleprinter] local complete (why) ptype=.. force=.. isRunning=.. hasJobs=.. printing=.. lineCount=.. prevLine=.. rev=.. baselineSet=..`。
+> - 2026-09-12 修复“开局打字机偶发不同步”（见 §1.2c）：①**丢弃路径**：`Apply` 在打字机对象尚未注册
+>   （`FindPrinter`=null）时只打 warning 就 `return` 丢弃，而 `EvState` 只在**文本变化**时广播（主机 `_lastRich`
+>   已更新）→ 主机不再重发 → 永久不同步；修法：丢弃时按 `ev+ptype` **暂存原始包字节**，`Tick` 里每 0.25s
+>   重试直到打字机注册（纯本地重试，不加网络流量）。②**卡在打印中**：客机自己的 `IsPrinting` 可能长期为真
+>   （协程卡住/标记残留；实测日志主机 `isPrinting=False` 而客机持续 `printing=True` 2 分钟）→ 旧逻辑
+>   `keepLocalAnimation=true` **永远跳过**主机最终态（revealed/遮罩/纸张/敲击）→ 揭示进度与纸张位置不同步；
+>   修法：揭示数 `StallSeconds=2s` 未前进 → 判定卡死 → 强制走最终态同步。
+> - 2026-08-22 建文。
 
 ---
 
@@ -50,6 +106,32 @@
 - **Harmony 接线**：`PostTeleprinterPrint` 方案感知——`--sync new` 走 `TeleprinterSyncV2.Instance.OnLocalPrint`，
   默认 old 走 `TeleprinterSync.OnLocalPrint`；`PreTeleprinterPrint` 客机本地打印抑制对 V1/V2 通用
   （按 `TeleprinterSyncV2.IsApplying` / `TeleprinterSync.IsApplying` 放行网络复现）。
+
+### 1.2c 已知问题：开局打字机偶发不同步（2026-09-12 ✅ 已修）
+
+| 现象 | 分析 | 状态 |
+|---|---|---|
+| 开局（客机加入/任务场景加载前后）偶发：客机某台打字机空白/内容与主机不一致，且此后不再自愈 | `Apply` 里 `EvPrint`/`EvState`/`EvAppend` 均有 `if (tp == null) { warning; return; }`（`FindPrinter` → `Teleprinter.GetTeleprinter(ptype)`）→ 事件被**丢弃**；而主机侧 `EvState` 只在 `rich+revealed` **变化**时广播（`_lastRich` 已写入）→ 不会再发 → 永久不同步。是否命中完全取决于加入/加载时序 → **偶发** | ✅ 已修 |
+
+**修法**（`TeleprinterSync.cs`）：
+
+1. `Apply(byte ev, byte ptype, NetDataReader r, byte[] raw)` 新增 `raw` 参数（原始包字节）。
+2. 三处 `tp == null` 分支改为 `StashTp(ev, ptype, raw, what)`：按 `ev*256+ptype` 暂存**最新一份**原始包。
+3. `Tick` 顶部（**在所有 host-only 早期返回之前**，客户端也会跑）每 0.25s 调 `RetryPendingTeleprinter()`：
+   打字机注册后重新解包并调 `Apply`（日志 `[Teleprinter] retry stashed ev=… ptype=…`）；
+   上限 240 次×0.25s ≈ 60s 后放弃（避免无界堆积）。
+4. `Reset()` 清空暂存。
+
+**第二次迭代（2026-09-12，仍偶发不同步）**：实测日志显示两条不同步都不在“丢弃”路径上——
+主机 `[Teleprinter] state ptype=0 … isPrinting=False revealed=524 maskCount=0`，“同一时刻客机
+`applied state ptype=0 printing=True keepAnim=True`” → **客机卡在打印中**（`IsPrinting` 残留/协程未完成）
+→ `keepLocalAnimation=true` 永远跳过最终态。修法：客机在 `Apply(EvState)` 中记录每台打字机的
+“揭示数变化时刻”，若 `IsPrinting=true` 但 `_revealedCharIndex` **2s 内未前进** → 判定卡死 →
+强制 `keepLocalAnimation=false` 走最终态（日志 `[Teleprinter] local print stalled … → 强制同步最终态`）；
+新一次 `EvPrint` 会重置该基准。
+
+> 验证要点：客机日志出现 `apply … but printer null … → 暂存待打字机注册后重试`，随后出现
+> `retry stashed … （打字机已注册）`，之后 `applied print/state` 正常——即不再丢失开局简报。
 
 ### 1.3 关键属性（dump_Assembly-CSharp.txt）
 

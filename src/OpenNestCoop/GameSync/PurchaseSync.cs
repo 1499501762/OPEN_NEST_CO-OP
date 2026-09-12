@@ -16,7 +16,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class PurchaseSync : ISyncedModule
 {
-    public byte MsgType => 132;
+    public int MsgType => 132;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new PurchaseSync());
 
     /// <summary>应用远端购买事件时的防环标志（Harmony patch 据此不重复上报）。</summary>
     public static bool IsApplying;

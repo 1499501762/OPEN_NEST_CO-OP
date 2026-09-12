@@ -28,7 +28,8 @@ public static class ModLog
     /// <summary>是否启用（Init 成功创建目录）。未启用时 Write 为无操作。</summary>
     public static bool Enabled => _dir.Length > 0;
 
-    /// <summary>初始化：创建日志目录。失败则禁用独立文件（回退：路由日志不落盘，主日志也不写）。</summary>
+    /// <summary>初始化：创建日志目录 + 清空上次会话的旧日志文件（默认每次启动清空，便于按本次会话读日志）。
+    /// 失败则禁用独立文件（回退：路由日志不落盘，主日志也不写）。</summary>
     public static void Init(string dir)
     {
         try
@@ -36,6 +37,17 @@ public static class ModLog
             if (string.IsNullOrEmpty(dir)) { _dir = ""; return; }
             Directory.CreateDirectory(dir);
             _dir = dir;
+            // ⚠️ 2026-08-30：每次启动清空旧日志（*.log），新会话从头记（上次会话日志不再残留混淆）。
+            try
+            {
+                foreach (var f in Directory.GetFiles(dir, "*.log"))
+                {
+                    try { File.Delete(f); } catch { }
+                }
+                _buf.Clear();
+                _lastFlush.Clear();
+            }
+            catch { }
         }
         catch { _dir = ""; }
     }

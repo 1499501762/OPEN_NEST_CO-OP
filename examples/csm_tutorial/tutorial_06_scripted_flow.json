@@ -1,0 +1,16 @@
+{
+  "Id": "tutorial.06.scriptflow",
+  "DisplayName": "教程6 脚本条件与挂起",
+  "Description": "B1/B2：ScriptedWait 挂起直到 wait_player_ready 模块置 BoolResult=true；ScriptedCondition 按 is_timer_ok 模块布尔结果走 To[0](win)/To[1](lose)。⚠️ 这两个模块需 C# 注册（见 README），不注册则挂起/条件按默认 true 处理。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "教程6：等 wait_player_ready 模块说'好了'（每帧轮询 BoolResult）。", "To": ["n3"] },
+    { "Id": "n3", "Kind": "ScriptedWait", "ModuleName": "wait_player_ready", "To": ["n4"] },
+    { "Id": "n4", "Kind": "ScriptedCondition", "ModuleName": "is_timer_ok", "To": ["win", "lose"] },
+    { "Id": "win", "Kind": "Print", "Message": "教程6：条件通过，成功！", "To": ["end"] },
+    { "Id": "lose", "Kind": "Fail" },
+    { "Id": "end", "Kind": "End" }
+  ]
+}

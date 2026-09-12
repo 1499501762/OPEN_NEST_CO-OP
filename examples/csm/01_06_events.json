@@ -1,0 +1,19 @@
+{
+  "Id": "sample.events",
+  "DisplayName": "游戏事件响应（示例）",
+  "Description": "事件桥接 A 方案样板：任务图用 WaitForEvent 等待游戏事件（shell.landed 炮弹着弹 / mission.completed 任务完成），超时则走失败结局。脚本模块事件订阅 B 方案需 C# 注册（见 README / docs/CUSTOM_MISSION.md 15.6）。纯新增任务。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["w1"] },
+    { "Id": "w1", "Kind": "WaitForEvent", "EventId": "mission.started", "Timeout": 30, "To": ["w2"] },
+    { "Id": "w2", "Kind": "Branch", "EventId": "shell.landed", "Timeout": 120,
+      "Routes": [ { "EventId": "shell.landed", "TargetNodeId": "hit" } ], "To": ["lose"] },
+    { "Id": "hit", "Kind": "Print", "Message": "炮弹着弹！命中评估已记录。", "To": ["w3"] },
+    { "Id": "w3", "Kind": "Branch", "EventId": "mission.completed", "Timeout": 300,
+      "Routes": [ { "EventId": "mission.completed", "TargetNodeId": "done" } ], "To": ["lose"] },
+    { "Id": "done", "Kind": "Print", "Message": "任务完成信号收到，结算！", "To": ["end"] },
+    { "Id": "end", "Kind": "End" },
+    { "Id": "lose", "Kind": "Fail" }
+  ]
+}

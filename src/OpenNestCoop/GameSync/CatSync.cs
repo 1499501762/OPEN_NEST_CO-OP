@@ -24,7 +24,11 @@ public sealed class CatSync : ISyncedModule
 {
     /// <summary>猫 AI 软同步（高频容忍丢失）→ 全局降频时优先降。</summary>
     public NetModulePriority NetPriority => NetModulePriority.Low;
-    public byte MsgType => 106;
+    public int MsgType => 106;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案，含附加类型 133），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new CatSync(), null, null, CatEventMsgType);
     /// <summary>玩家-猫交互事件消息类型（同模块处理，见 CoopSyncRegistry.RegisterModule 附加类型）。</summary>
     public const byte CatEventMsgType = 133;
 
@@ -82,6 +86,8 @@ public sealed class CatSync : ISyncedModule
         if (_timer < Interval) return;
         _timer = 0f;
         if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 猫同步整体静默（不广播/不上行/不应用）
+        if (!CoopConfig.CatSync) return;
 
         if (net.IsHost)
         {
@@ -290,6 +296,8 @@ public sealed class CatSync : ISyncedModule
     {
         var net = CoopRuntime.Net;
         if (net == null) return;
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 不接收/不应用猫同步包
+        if (!CoopConfig.CatSync) return;
         try
         {
             var r = new NetDataReader(data);
@@ -483,6 +491,8 @@ public sealed class CatSync : ISyncedModule
     public static void OnLocalCatEvent(CatController cat, byte ev)
     {
         if (IsApplyingCat) return; // 应用远端事件时不重复上报（防环）
+        // 配置开关（docs/CONFIG.md `[Sync] CatSync`）：关 → 不上报猫交互事件
+        if (!CoopConfig.CatSync) return;
         var net = CoopRuntime.Net;
         if (net == null || cat == null) return;
         if (net.State != SessionState.Hosting && net.State != SessionState.Joined) return;

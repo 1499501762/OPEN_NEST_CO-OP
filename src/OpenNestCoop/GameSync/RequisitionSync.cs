@@ -15,6 +15,10 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public static class RequisitionSync
 {
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => Register());
+
     private static bool _registered;
     private static PowderChargeInventory _powderInv;
     private static int _powderSeenLog;

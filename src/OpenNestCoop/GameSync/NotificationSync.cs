@@ -16,7 +16,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class NotificationSync : ISyncedModule
 {
-    public byte MsgType => 131;
+    public int MsgType => 131;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new NotificationSync());
     private const byte MsgTypeId = 131;
 
     /// <summary>应用远端通知时的防环标志（ShowNotification postfix 据此不重复上报）。</summary>

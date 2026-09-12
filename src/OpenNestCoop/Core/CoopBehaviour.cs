@@ -30,6 +30,10 @@ public class CoopBehaviour : MonoBehaviour
             // 独立文件日志批量落盘（1s 间隔缓冲写，性能好；诊断/联机日志 → OpenNestLogs/*.log）
             OpenNestCore.Logging.ModLog.Flush(Time.unscaledDeltaTime);
 
+            // 配置文件热重载（标准 cfg，2s 轮询 mtime；改配置不用重启游戏。见 docs/CONFIG.md）
+            try { CoopConfig.Tick(Time.unscaledDeltaTime); }
+            catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CoopBehaviour] CoopConfig tick: {ex.Message}"); }
+
             // 自定义任务桥接驱动（OpenNestCore.Tasks → 游戏宿主）：单机驱动自定义任务状态机
             try { OpenNestCoop.GameSync.OncMissionBridge.Update(Time.unscaledDeltaTime); }
             catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[CoopBehaviour] OncMission Update: {ex.Message}"); }

@@ -14,7 +14,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class ShellSync : ISyncedModule
 {
-    public byte MsgType => 109;
+    public int MsgType => 109;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new ShellSync());
     private const float Interval = 0.5f;
     private const float Heartbeat = 1.5f; // 周期全量广播弹舱（保证弹药消耗同步；主机权威）
     private float _timer;

@@ -7,14 +7,27 @@ using OpenNestCoop.Core;
 namespace OpenNestCoop.GameSync;
 
 /// <summary>
-/// 咖啡机同步——用 ISyncedModule 自定义模块接入框架的参考实现（MsgType=100）。
+/// 咖啡机同步——用 ISyncedModule 自定义模块接入框架的参考实现。
 /// 同步 EspressoBrewingController 的 BrewState（冲煮状态机）。
 /// 机制：主机权威状态同步——客户端本地状态变化上行 → 主机应用 → 广播；防环。
 /// 更简单的设备值（药包/表盘等）可用 CoopSyncRegistry.RegisterInt/Float/Bool 直接注册。
+///
+/// ⚠️ 自注册参考（NetManager 注册管理器）：前导字节不再硬编码（旧 100），改为稳定 channelKey 自注册，
+/// 由 NetManager 统一分配空闲前导字节（见 CoopRuntime.RegisterLegacyModules 中
+/// CoopSyncRegistry.RegisterDynamicChannel(new CoffeeSync(), CoffeeSync.ChannelKey)）。
+/// 发送路径经 <see cref="MsgType"/>（= CoopRuntime.Net.ChannelType(ChannelKey)）取分配字节。
 /// </summary>
 public sealed class CoffeeSync : ISyncedModule
 {
-    public byte MsgType => 100;
+    /// <summary>自注册通道键（稳定字符串，双端一致；前导字节由 NetManager 注册管理器分配）。</summary>
+    public const string ChannelKey = "coffee";
+
+    /// <summary>本模块前导字节：由注册管理器为 ChannelKey 分配（动态注册）。</summary>
+    public int MsgType => OpenNestCoop.Core.CoopRuntime.Net?.ChannelType(ChannelKey) ?? 0;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案，动态通道），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new CoffeeSync(), ChannelKey);
 
     private const float Interval = 0.2f;
     private float _timer;

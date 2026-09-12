@@ -13,4 +13,7 @@ global using Il2CppSteamworks;
 // 用命名空间别名把 `Zagreekie` 映射到 `Il2CppZagreekie`（同 SleepyNodes 模式）——代码里
 // `Zagreekie.Tools.X` 两端都能解析（BepInEx 用 Zagreekie，ML 用 Il2CppZagreekie）。
 global using Zagreekie = Il2CppZagreekie;
+// ⚠️ 2026-08-31：TrajectorySystem（TrajectoryTarget/LocalTwoAxisTrajectoryTargetFollower 追踪器）
+// ML 端命名空间 Il2CppTrajectorySystem，BepInEx 端 TrajectorySystem —— 别名映射两端一致。
+global using TrajectorySystem = Il2CppTrajectorySystem;
 #endif

@@ -39,7 +39,11 @@ public sealed class ControlSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private ValueLayer Values => ValueLayer.Instance;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Control;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Control;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     /// <summary>低频兜底间隔（秒）：场景变化检测漏掉/控件迟到生成时兜底。原 V1 3s → 12s（任务场景控件一次性注册）。</summary>
     private const float FallbackInterval = 12f;

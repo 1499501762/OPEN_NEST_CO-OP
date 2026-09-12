@@ -1,0 +1,24 @@
+{
+  "Id": "selftest.03.timer.branch",
+  "DisplayName": "自检3 计时器/分支/并行",
+  "Description": "覆盖：Split(并行) / StartTimer / AddTimerTime / PauseTimer / ResumeTimer / WaitTimerExpired / WaitSeconds / Branch(事件路由+超时→Fail) / A2 timer.expired 事件 / 多入边汇合 / End。两路并行后汇合才结束。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["sp"] },
+    { "Id": "sp", "Kind": "Split", "To": ["ta", "tb"] },
+    { "Id": "ta", "Kind": "StartTimer", "TimerId": "t1", "Seconds": 2, "To": ["t2"] },
+    { "Id": "t2", "Kind": "AddTimerTime", "TimerId": "t1", "Seconds": 1, "To": ["t3"] },
+    { "Id": "t3", "Kind": "PauseTimer", "TimerId": "t1", "To": ["t4"] },
+    { "Id": "t4", "Kind": "WaitSeconds", "Seconds": 1, "To": ["t5"] },
+    { "Id": "t5", "Kind": "ResumeTimer", "TimerId": "t1", "To": ["wta"] },
+    { "Id": "wta", "Kind": "WaitTimerExpired", "TimerId": "t1", "To": ["pa"] },
+    { "Id": "pa", "Kind": "Print", "Message": "[自检3] 计时器链路 OK（启动/加时/暂停/恢复/等待到期）", "To": ["join"] },
+    { "Id": "tb", "Kind": "Branch", "EventId": "timer.expired.t1", "Timeout": 20,
+      "Routes": [ { "EventId": "timer.expired.t1", "TargetNodeId": "pb" } ], "To": ["fail"] },
+    { "Id": "pb", "Kind": "Print", "Message": "[自检3] 事件分支收到 timer.expired.t1 OK", "To": ["join"] },
+    { "Id": "join", "Kind": "Print", "Message": "[自检3] 两路汇合 OK（并行+事件+计时器）", "From": ["pa", "pb"], "To": ["n2"] },
+    { "Id": "n2", "Kind": "End" },
+    { "Id": "fail", "Kind": "Fail" }
+  ]
+}

@@ -5,6 +5,10 @@
 > 作为后续"是否全解耦"的决策依据。2026-08-22 评估，**2026-08-23 修订**（预备激发/弹舱动作已事件解耦）。
 >
 > **关联文档**：`docs/INTERACTABLES.md`（实体术语表）、`docs/ARCHITECTURE.md`（架构）。
+>
+> **更新记录**：
+> - 2026-09-12 新增 `Artillery Computer Console/Calculate Universal Button`（炮术计算台计算按钮）
+>   → 无独立方法可调，保留实体耦合（ButtonClickSync 点击复现），但新增后**默认关**（配置开关 `CalculateButtonSync`，见 `docs/CONFIG.md`）。
 
 ---
 
@@ -59,6 +63,7 @@
 | `SaftySwitch (4)`（重置征用卡位置） | 无独立方法 | 实体耦合 | 🟢 保留（无方法可调） |
 | `War Horn` 汽笛 `universal button`（×2） | 无独立类（UnityEvent 绑定） | 实体耦合 | 🟢 保留（无方法可调） |
 | `Floor Hatch` 舱门 `Universal Button`（×2） | `AnimatorBoolToggler`（IsOpen） | HatchSync 状态同步 + 点击复现完整动画 | 🟢 保留（动画复杂，点击复现 + 状态对账正确） |
+| `Artillery Computer Console/Calculate Universal Button`（炮术计算台计算按钮） | 无独立方法（UnityEvent 绑定） | 2026-09-12 起纳入 ButtonClickSync 点击复现（**配置开关 `CalculateButtonSync`，默认关**） | 🟢 保留（无方法可调；默认关→用户需要再开，见 `docs/CONFIG.md`） |
 | `Locking Lever` / `Wheel Blocker` / `Handle Blocker`（仰角锁止） | `Interactable`（非 LookAtTarget） | ⚠️ 实测是 `Interactable` 类型 → **不走点击同步**，当前可能未同步 | 🔴 需确认用 Interactable 事件同步 |
 
 ---

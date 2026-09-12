@@ -46,24 +46,26 @@
 ### Hello（客户端 → 主机，`MsgType.Hello=1`）
 
 ```
-[syncScheme:byte] [handshakeVer:byte=2] [version:string] [password:string] [name:string]
+[syncScheme:byte] [headerWidth:byte] [handshakeVer:byte=4] [version:string] [password:string] [name:string] [channelTable...]
 ```
 
 | 字段 | 含义 |
 |---|---|
 | `syncScheme` | 同步方案：0=V1（默认）1=V2（--sync new） |
-| `handshakeVer` | 握手协议版本（`NetConfig.HandshakeVersion=2`）。旧客户端 Hello 无此字节（其后直接是 name）→ 读到 ASCII 值 ≠ 2 → 拒绝 |
+| `headerWidth` | **前导字节宽度沟通**（1/2，`NetProtocol.HeaderWidth`）：1 字节前导用尽自动扩展为 2 字节，双端必须一致，不符 → 拒绝/离开 |
+| `handshakeVer` | 握手协议版本（`NetConfig.HandshakeVersion=4`）。旧客户端 Hello 无此字节 → 读到 ASCII 值 ≠ 4 → 拒绝 |
 | `version` | 模组版本号（`NetConfig.Version`），与主机不符 → 拒绝 |
 | `password` | 房间密码（明文，主机按 hash 校验；非加密，仅防随便进） |
 | `name` | 玩家昵称 |
+| `channelTable` | **注册通道表**（`NetManager.WriteChannelTable`）：`[byte 条目数]` 每项 `[string key][ushort type]`。key 前缀 `D:`=动态通道（模块自注册，前导字节由注册管理器分配）、`S:`=静态采用（硬编码 MsgType）。type 用 ushort（兼容 2 字节扩展 ≥256）。主机校验（`NetManager.VerifyHostChannelTable`）：客户端带主机不认识的通道 → 拒绝（build 不兼容） |
 
 ### Welcome（主机 → 客户端，`MsgType.Welcome=2`）
 
 ```
-[syncScheme:byte] [handshakeVer:byte=2] [version:string] [playerId:byte] [roster...]
+[syncScheme:byte] [headerWidth:byte] [handshakeVer:byte=4] [version:string] [playerId:byte] [roster...] [channelTable...]
 ```
 
-主机版本号随 Welcome 下发，客户端核对不符 → 离开并提示。
+主机版本号随 Welcome 下发，客户端核对不符 → 离开并提示。**前导字节宽度（`headerWidth`）**随 Welcome 沟通（主机权威，与本端一致）。**注册通道表（前导字节 2 下发）**：主机把**权威注册表**附加在 Welcome 尾部（`NetManager.WriteChannelTable`），客户端 `NetManager.ApplyHostChannelTable` 采纳——动态通道前导字节以主机为准（重映射），保证双端路由表一致（`NetManager.TryRoute` 按前导字节统一分发）。注册管理器逻辑已并入 `NetManager`（优先级随注册提供、缺省默认，`RegisterChannel(key, ChannelCallbacks, priority)` 支持函数式注册；`MsgType` 为 int，1 字节空间用尽由 `AllocateType()` 自动扩展为 2 字节前导）。
 
 ### Kick（主机 → 被拒/被踢端，`MsgType.Kick=32`）
 

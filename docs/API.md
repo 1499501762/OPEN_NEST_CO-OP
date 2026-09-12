@@ -1,6 +1,10 @@
 # Open Nest Co-op Mod — 同步/扩展 API 文档
 
 > **更新记录**：
+> - 2026-09-12（三）①新增**关键包保护表注册函数** `NetManager.RegisterCriticalType/RegisterCriticalTypes/IsCriticalRegistered`
+>   （合包满时不丢关键消息；动态 Critical/High 优先级模块自动登记）；②新增**配置文件**（`CoopConfig`，标准 INI + 热重载，
+>   见 `docs/CONFIG.md`）。
+> - 2026-09-12 新增 `ShotSync`（动态通道 `shotparams`）：炮弹发射参数主机权威下发（客机套用到本地同发炮弹，保证两端弹道/落点一致）。
 > - 2026-08-23 Hello/Welcome 扩展（同步方案+握手版本+模组版本+房间密码）、Kick 带原因；协议表同步。见 `docs/LOBBY.md`。
 
 本文档面向想扩展本联机 mod 的开发者（其他模组、脚本、自定义内容作者）。
@@ -22,6 +26,8 @@
 | `CoopSyncRegistry.RegisterFloat/Int/Bool` | 同步设备/组件的**数值状态**（表盘、压力、药包、罐子等） | `CoopSyncRegistry` |
 | `CoopSyncRegistry.RegisterModule(ISyncedModule)` | 同步任意**自定义组件/事件**（需要自己的消息类型） | `CoopSyncRegistry` |
 | `PlayerVisualRegistry.Register(IPlayerVisualProvider)` | 替换/填充**玩家角色模型、骨架、动画** | `PlayerVisualRegistry` |
+| `NetManager.RegisterCriticalType(int)` | 把某消息类型登记为**关键包**（合包满时不丢、不重发也不会永久不同步） | `OpenNestCoop.Net.NetManager` |
+| `CoopConfig` | 读写本模组**配置文件**（猫/唱片机/计算按钮等开关；热重载） | `OpenNestCoop.Core.CoopConfig` |
 
 网络传输、消息封装（`NetProtocol`）、Steam P2P（`SteamTransport`）由本 mod 提供，扩展方只需提供数据读写。
 运行时访问统一走平台无关核心 `CoopRuntime.Net`（`OpenNestCoop.Core`）——`Plugin` 只是 BepInEx 入口壳，**不再有 `Plugin.Net`**。
@@ -85,7 +91,11 @@ CoopSyncRegistry.RegisterBool("radio/playing",
 ```csharp
 public sealed class MyCoffeeSync : ISyncedModule
 {
-    public byte MsgType => 100; // 用 100+ 避开内建消息类型
+    public const string ChannelKey = "mycoffee"; // 稳定通道键（双端一致）
+
+    // 前导字节由 NetManager 注册管理器分配（RegisterDynamicChannel 调用后生效；不要硬编码 100/101...）。
+    // MsgType 是 int：1 字节空间（1-255）用尽时管理器自动扩展为 2 字节类型（≥256），无需手工干预。
+    public int MsgType => OpenNestCoop.Core.CoopRuntime.Net?.ChannelType(ChannelKey) ?? 0;
 
     public void Tick(float dt)
     {
@@ -109,15 +119,78 @@ public sealed class MyCoffeeSync : ISyncedModule
     }
 }
 
-// 加载时注册：
-CoopSyncRegistry.RegisterModule(new MyCoffeeSync());
+// 加载时自注册（推荐，前导字节由 NetManager 统一分配，杜绝手工挑号冲突；优先级可缺省=模块 NetPriority）：
+CoopSyncRegistry.RegisterDynamicChannel(new MyCoffeeSync(), MyCoffeeSync.ChannelKey);
+// 可显式带优先级：CoopSyncRegistry.RegisterDynamicChannel(new MyCoffeeSync(), MyCoffeeSync.ChannelKey, NetModulePriority.Low);
+
+// 或沿用硬编码 MsgType（100+，避开内建消息类型）：
+// CoopSyncRegistry.RegisterModule(new MyCoffeeSync());
 ```
 
-> **参考实现**：本 mod 内置 `CoffeeSync`（`GameSync/CoffeeSync.cs`，MsgType=100）即用此方式同步
-> `EspressoBrewingController.BrewState`（咖啡机冲煮状态机），可作为自定义模块的完整范例。
+> **参考实现**：本 mod 内置 `CoffeeSync`（`GameSync/CoffeeSync.cs`，channelKey=`"coffee"`）即用
+> **自注册方式**同步 `EspressoBrewingController.BrewState`（咖啡机冲煮状态机），可作为自定义模块的完整范例。
+
+> **注册管理器（已并入 `NetManager`，`OpenNestCoop.Net`）**：
+> - **前导字节 1（Hello）/2（Welcome）作为注册通道**——客户端把注册表附在 Hello 上行，主机校验后把
+>   **权威注册表**附在 Welcome 下发，客户端采纳（主机权威，与星型拓扑一致）。
+> - **统一路由**：`NetManager.OnPacket` 优先经 `NetManager.TryRoute` 按前导字节分发给已注册模块；
+>   既有硬编码模块在 `CoopSyncRegistry.RegisterModule` 时被自动**采用**（`NetManager.AdoptModule`），无需改动。
+> - **优先级随注册一起**：`RegisterModule(module, priority?, extras)` / `RegisterDynamicChannel(module, key, priority?)`，
+>   缺省 → 模块 `NetPriority`（默认 Normal）；`TickAll` 按注册登记的优先级缩放。
+> - **函数式注册**（无需实现 ISyncedModule）：`CoopRuntime.Net.RegisterChannel(key, new ChannelCallbacks{...})`
+>   或 `CoopRuntime.Net.RegisterChannel(key, onPacket, tick)`——回调容器 `ChannelCallbacks`
+>   （OnPacket/Tick/OnSessionStarted/OnSessionEnded/OnLateJoin/Reset，可缺省）。
+> - **动态分配段**：230-254 → 160-199 → 34-99 → 全 1-255 → **自动扩展 2 字节**（`NetProtocol.HeaderWidth=2`，
+>   池 0x0300+；经 Hello/Welcome 握手沟通前导字节宽度，双端必须一致）。`MsgType` 为 int，`Begin(int)` 发送。
 
 > **其他辅助 API**：`CoopSyncRegistry.Modules`（只读已注册列表）、`FindModule<T>()`（按类型找模块，快照应用用）、
 > `RegisterModule(module, params byte[] extraTypes)`（一个模块处理多个 MsgType，如 `CatSync` 106+133、`ButtonClickSync` 118+135、`PunchcardSync` 136+137+138）。
+
+### 3.1 关键包保护表（`NetManager.RegisterCriticalType`）
+
+发送端有一个**合包缓冲**：帧末把多个小子包合并成一个大包发（省 Steam P2P 包数）。
+缓冲条数超上限时**会丢弃**——丢的大多是可重发的周期状态（无影响），但丢到
+**边沿触发类消息**（事件、交互、参数下发）就是**永久不同步**。故这些类型被“关键包保护”：合包满时照常入队。
+
+```csharp
+using OpenNestCoop.Net;
+
+// 登记一个关键类型（幂等，可多次调用；参数为 MsgType 的整数值）
+NetManager.RegisterCriticalType((int)MsgType.MapMarkerAdd); // 框架内建类型已默认保护，无需重复登记
+NetManager.RegisterCriticalTypes(myEventType, myCmdType);   // 批量
+bool protectedNow = NetManager.IsCriticalRegistered(myEventType); // 自检/诊断
+```
+
+何时需要显式登记：
+1. 模块优先级**不是** `Critical/High`，但其**个别类型**是边沿触发（丢了永久不同步）；
+2. 自己管理发送（不走 `EnqueueBatch`）但想统一在日志/诊断里体现的通道；
+3. 第三方模组用自己的通道发关键消息时主动登记。
+
+自动登记（无需调用）：所有**优先级为 `Critical`/`High` 的模块**，在注册时（`AdoptModule` /
+`RegisterChannel`）其类型自动进入保护表——**含动态分配的通道**（`shotparams`/`blocker`/铁巢图标 146 等）。
+诊断：主日志 `[RegMgr] channel 'xxx' → type N (pri=High, critical=True, width=1)`。
+
+> ⚠️ **历史教训（2026-09-12）**：旧实现只保护**硬编码类型表**且调用点写死 `t < 256` →
+> 动态通道（`shotparams`/`blocker`/铁巢图标）**不在保护范围** → 合包满时被丢弃且不重发
+> = “模组自己丢包”（表现为偶发丢炮弹/落点参数丢失）。新增动态通道模块时，**要么优先级给 `High` 以上，
+> 要么显式 `RegisterCriticalType`**，不要假设“自动就安全”。
+
+### 3.2 配置文件（`CoopConfig`）
+
+本模组的设置项（猫同步/唱片机同步/计算按钮同步等）放在标准 INI 文件里，**热重载**。
+完整说明（路径/格式/设置项表/新增步骤/双端一致性）见 **`docs/CONFIG.md`**。
+
+```csharp
+using OpenNestCoop.Core;
+
+bool on = CoopConfig.CatSync;                  // 读（缺文件/缺键/格式错 → 默认值，不抛异常）
+string path = CoopConfig.FilePath;             // 实际生效路径（排障用）
+CoopConfig.Set("Sync", "CatSync", "false");   // 程序化改值并保存（供模组菜单/自动化）
+CoopConfig.Changed += () => { /* 热重载后值真的变了 */ };
+```
+
+> 自己模组的设置建议：**自己建配置**，或在本模组 `CoopConfig` 里按 `docs/CONFIG.md` §5 的三步加项。
+> 开关是“本端行为开关”、不参与握手协商——两端不一致不会报错，只会表现为该功能不同步（排障先对比两端 `[CoopConfig] values` 日志行）。
 
 ### 发包示例（复用框架消息封装 + Steam P2P）
 
@@ -256,7 +329,7 @@ w.Put(rot.x); w.Put(rot.y); w.Put(rot.z); w.Put(rot.w);
 | 10 | `TurretState` | 主机→全员 | 炮塔旋转 + 各炮俯仰 |
 | 11 | `GunFire` | 主机→全员 | 开火事件（gunIndex） |
 | 12 | `TurretInput` | 瞄准手→主机 | 期望旋转/俯仰 |
-| 13 | `Impact` | 主机→全员 | 炮弹落点 |
+| 13 | `Impact` | 主机→全员 | 着弹结果：落点 `(x,y)` + 照片角度 `tilt` + `force`（`[x][y][tilt][force]`；`force=1` 仅中途加入强制对齐追踪器，正常着弹=0；详见 `docs/IMPACT_ASSESSMENT.md`） |
 | 14 | `MissionState` | 主机→全员 | 任务/目标状态 |
 | 15 | `CounterBattery` | 主机→全员 | 反炮兵事件（落点；seed 走 100+ 模块） |
 | 16 | `PlayerPos` | 客户端→主机→其他 | 玩家位置/朝向/速度分量（unreliable + 2s 心跳帧） |
@@ -301,6 +374,7 @@ w.Put(rot.x); w.Put(rot.y); w.Put(rot.z); w.Put(rot.w);
 | 141 | `CylinderActionSync` | 弹舱动作 |
 | 142 | `ChargeInventorySync` | 装药库存 |
 | 143 | `ChargeButtonSync` | 按钮 Dispencer active 掩码 |
+| 动态 | `ShotSync` | 炮弹发射参数（shellId/起点/终点/飞行时长/路径长；channelKey=`shotparams`，主机权威——客机套用到本地同发炮弹，保证两端弹道/落点一致；详见 `docs/IMPACT_ASSESSMENT.md`）|
 | **100+** | 自定义 | 留给扩展方 `ISyncedModule` |
 
 > **V2（`--sync new`）**：独立消息段 **200-229**（`V2Event=200`/`V2Value=201`/`V2Button=202`/`V2HostData=203`/`V2Control=204`/`V2Player=205`…`V2GunLink=229`）。

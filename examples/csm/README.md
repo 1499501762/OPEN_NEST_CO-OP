@@ -20,6 +20,9 @@
 | `01_02_killwave.json` | `sample.killwave` | 地图实体（Fire 目标）：SpawnEntity/WaitEntityDestroyed/目标进度（AddProgress） |
 | `01_03_branch.json` | `sample.branch` | 事件分支：Branch/Routes/Timeout → End（成功）/Fail（失败） |
 | `01_04_full_operation.json` | `sample.full` | **完整综合**：简报/目标/限时计时/并行竞争（击杀线 vs 倒计时线，先到者定胜负）/奖励/成功失败双结局 |
+| `01_05_scripted.json` | `sample.scripted` | **脚本化模块**：`Scripted` 节点按 `ModuleName` 分派到宿主注册的 C# 脚本模块（`announce`/`ping` 内置），`ModuleArgs` 传 JSON 参数 |
+| `01_06_events.json` | `sample.events` | **游戏事件响应（A 方案）**：`Branch` 等待游戏事件（`mission.started`/`shell.landed`/`mission.completed`），事件命中→成功线、超时→失败线 |
+| `01_07_scripted_flow.json` | `sample.scriptflow` | **脚本化流程（B1/B2/A2）**：`Scripted` 动作 + `StartTimer` + `ScriptedWait` 挂起（模块问"好了没"）+ `ScriptedCondition` 条件分支（模块布尔结果走不同结局） |
 | `02_campaign.json` | `sample.campaign` | 战役（前置/后置）：OncOperation + OncMissionRef.Requires |
 
 ## 节点/字段速查（JSON 字段与 `OncNode` 一致）
@@ -28,7 +31,26 @@
 - `Kind` 取值（`OncNodeKind`）：`Start/End/Fail/WaitSeconds/WaitForEvent/WaitEntityDestroyed/WaitTimerExpired/
   Branch/RandomBranch/Split/Objective/ObjectiveComplete/ObjectiveFail/Teleprinter/Notify/SceneNotification/
   SpawnEntity/MoveEntity/DamageEntity/SetEntityState/Impact/AddRequisitionPoints/AddShell/AddPowderCharge/
-  StartTimer/StopTimer/PauseTimer/ResumeTimer/AddTimerTime/UnlockSceneObject/Custom`。
+  StartTimer/StopTimer/PauseTimer/ResumeTimer/AddTimerTime/UnlockSceneObject/Custom/Scripted`。
+- **脚本化模块（`Scripted`）**：`ModuleName`（分派键，须先 `OncMissionBridge.RegisterScriptedModule(name, fn)` 注册；
+  内置 `announce`/`ping`）+ 可选 `ModuleArgs`（JSON 字符串，传给模块）。原生侧经
+  `State_CustomTrackingVariable` 载体（`variableName="onc.script.<name>"`）或节点 ID `onc_script_<name>` 触发，
+  见 `docs/CUSTOM_MISSION.md` 第 15 节。
+- **游戏事件（A 方案桥接）**：任务图 `WaitForEvent`/`Branch` 可直接等游戏事件（事件源见下表）；
+  `Branch` 用 `Routes`（事件命中→指定节点）+ `To`（超时→兜底）。事件清单：
+  `mission.started/completed/failed/finished/reloaded/map/menu`、`shell.landed`、`interact.click`/`interact.slot`、
+  `gun.fired`、`requisition.spent`、`notification.shown`、`teleprinter.printed`、`counterbattery`、`turret.moved`、
+  `timer.expired[.<id>]`、`entity.destroyed[.<id>]`。
+- **脚本模块事件订阅（B 方案，需 C# 注册）**：`OncMissionBridge.RegisterScriptedHook("shell.landed", "myModule")`
+  ——游戏事件触发时**异步、可多次**地分派脚本模块（`ctx.Event` 携带 EventId/Payload），不依赖节点流程。
+  ⚠️ 事件源纪律：同一事件只选一条轨（Core 走 A+B / 原生任务 C 原生 `Event_*` 为主），防双触发，见
+  `docs/NODE_CATALOGUE.md` 第六节。
+- **脚本化条件/挂起（B1/B2）**：`ScriptedCondition`（模块设 `ctx.BoolResult`，true 走 To[0]/false 走 To[1]）、
+  `ScriptedWait`（挂起直到模块 BoolResult=true）。模块需 C# 注册。
+- **声明式 JSON 内置模块（B6，无需注册）**：`announce`/`print`/`requisition`/`shell`/`powder`/`log`/`ping`
+  ——`ModuleName` 直接写，`ModuleArgs` 传 JSON。
+- **计时器到期（A2）**：`StartTimer` 归零 → `timer.expired.<id>` 事件（脚本模块可订阅）。
+- **原生结算（D，可选）**：任务 JSON 加 `"NativeComplete": true` → 完成/失败时额外走原生 MissionManager 结算。
 - `ObjectiveAction`：`Start/SetProgress/AddProgress`。
 - 目标进度自动完成：`Target>0` 且进度 ≥ Target 时自动 Completed。
 - **选任务面板卡片（可选 `"Card"` 字段）**：`X/Y`（相对父容器左上，右下为正）、`Width/Height`（尺寸）、

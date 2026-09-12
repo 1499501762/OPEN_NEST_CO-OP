@@ -1,0 +1,15 @@
+{
+  "Id": "tutorial.04.entities",
+  "DisplayName": "教程4 地图实体",
+  "Description": "Fire 目标：SpawnEntity 生成敌人（Role=Target 可被炮击识别）→ WaitEntityDestroyed 挂起等摧毁 → 击破后打印完成。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "教程4：第一波敌人已生成，炮击摧毁它。", "To": ["s1"] },
+    { "Id": "s1", "Kind": "SpawnEntity", "EntityId": "tutEnemyA", "EntityName": "教程敌人", "X": 8, "Y": 5, "Health": 50, "Armour": 0, "Role": "Target", "To": ["w1"] },
+    { "Id": "w1", "Kind": "WaitEntityDestroyed", "EntityId": "tutEnemyA", "To": ["p1"] },
+    { "Id": "p1", "Kind": "Print", "Message": "第一波击破！任务完成。", "To": ["end"] },
+    { "Id": "end", "Kind": "End" }
+  ]
+}

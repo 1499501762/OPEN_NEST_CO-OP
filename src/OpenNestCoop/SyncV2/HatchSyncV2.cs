@@ -23,7 +23,11 @@ public sealed class HatchSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Hatch;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Hatch;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     private const float Interval = 1.0f;
     private float _timer;

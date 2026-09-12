@@ -15,7 +15,15 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class HatchSync : ISyncedModule
 {
-    public byte MsgType => 117;
+    public int MsgType => 117;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册；同时注册中途加入快照
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister()
+    {
+        CoopSyncRegistry.PendingRegister(false, () => new HatchSync());
+        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("hatch", BuildHatchSnapshot, ApplyHatchSnapshot));
+    }
     private const float Interval = 1.0f; // 1.0s（原 0.4s，降低 FindObjectsOfType<AnimatorBoolToggler> 高频扫描 CPU）
     private float _timer;
     private int _sendLog;

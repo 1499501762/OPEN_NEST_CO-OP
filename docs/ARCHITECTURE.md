@@ -15,6 +15,24 @@
 > **2026-08-25 通道原则**：**过程（高频连续值/位置）→ unreliable；结果（离散状态/事件/心跳全量）→ reliable 硬同步**。
 > V1 已符合（PlayerSync 位置/ValueSync 高频 unreliable + 2s reliable 心跳）；V2 修正（`ValueLayer` 心跳/低频改 reliable、
 > `PlayerSyncV2` 加 2s reliable 心跳）。
+>
+> **2026-09-12 修订**：新增 `ShotSync`（动态通道 `shotparams`，V1）——炮弹**发射参数**主机权威下发
+> （起点/终点/飞行时长/路径长），客机套用到本地同发炮弹，修“两端落点不一致”的**根因**
+> （原先假设“两端开火参数相同→本地模拟一致”已证伪）；详见 `docs/IMPACT_ASSESSMENT.md`。
+>
+> **2026-09-12 修订（二）**：①`NetManager.IsCriticalType` 由“硬编码类型表 + 仅支持 <256”扩展为
+> **同时保护“动态/静态注册且优先级 Critical/High 的模块类型”**（`AdoptOneChannel` / `RegisterChannel` 登记 `_criticalTypes`）
+> —— 旧实现下动态通道（`shotparams`/`blocker`/铁巢位置图标等）在合包满时会被丢弃（“模组丢包”根因之一）；
+> ②`MissionSync` 客户端**跟随主机非任务相位**：主机回主菜单（phase=0）→ `LoadMainMenu()`、
+> 选任务界面（phase=1）→ `EnterBrowsingMap()`（旧实现只 `SetPhase` 改内部字段，不切界面 → 客机停在任务场景）。
+>
+> **2026-09-12 修订（三）**：①**新增配置文件子系统** `Core/Config/CoopConfig.cs`（标准 INI，
+> BepInEx → `BepInEx/config/OpenNestCoop.cfg`、MelonLoader → `UserData/OpenNestCoop.cfg`，2s mtime 热重载）——
+> `CoopRuntime.Startup` 加载、`CoopBehaviour.Update` 驱动；设置项：`CatSync`/`RecordPlayerSync`/`CalculateButtonSync`，
+> 被门控模块：`GameSync|SyncV2` 的 `CatSync`、`RecordPlayerSync`（含交互事件与中途加入快照）。详见 `docs/CONFIG.md`；
+> ②**关键包保护表新增公开注册函数** `NetManager.RegisterCriticalType/RegisterCriticalTypes/IsCriticalRegistered`
+> （第三方模块/非 Critical 优先级模块可显式登记；见 `docs/API.md` §3.1）；
+> ③**新交互同步**：`Artillery Computer Console/Calculate Universal Button` 纳入 `ButtonClickSync`（配置开关，默认关）。
 
 ---
 
@@ -33,6 +51,7 @@ Plugin.cs / MelonModEntry.cs        ← 平台壳（仅初始化 + 卸载）
        ├─ CoopSyncRegistry   ISyncedModule 注册表（V1 ~26 模块 + 附加类型路由；--sync new 走 SyncV2 分层）
        ├─ StateSnapshotSync  中途加入全量快照（30/31，已注册 8 个快照）
        ├─ Patches/Harmony    游戏方法挂钩（开火/输入/装填/地图/预备激发/弹舱动作等）
+       ├─ CoopConfig         配置文件（标准 INI，热重载；模块开关：猫/唱片机/计算按钮，见 docs/CONFIG.md）
        └─ GameSync/*         同步模块（V1：Player/Value/Control/Entity/Cat/Arm/CylinderAction/...）
 ```
 
@@ -44,7 +63,10 @@ ButtonLayer/ControlSyncV2/PlayerSyncV2/...，见 `docs/SYNC_V2_DEV.md`）。双�
 `CoffeeSync / MissionSync / StateSnapshotSync / MissionEventSync / NotificationSync / TeleprinterSync /
 CounterBatterySync / EntitySync / ReconPhotoSync / CatSync / MapMarkerSync / RecordItemSync / ShellSync /
 SequenceSync / HatchSync / ButtonClickSync / ArmSync / CylinderActionSync / ChargeInventorySync /
-ChargeButtonSync / MapTokenSync / GunLinkSync / PunchcardSync / M3EnvSync / RequisitionSync / PurchaseSync`
+ChargeButtonSync / MapTokenSync / GunLinkSync / PunchcardSync / M3EnvSync / RequisitionSync / PurchaseSync /
+ShotSync`
+（`ShotSync` = 炮弹发射参数（动态通道 `shotparams`）：主机权威下发这发炮弹的起点/终点/飞行时长/路径长，
+客机套用到本地同发炮弹 → 两端弹道一致、落点一致，见 `docs/IMPACT_ASSESSMENT.md`）
 （**0.1.8 新增/早期文档缺失**：`ArmSync`=140 预备激发、`CylinderActionSync`=141 弹舱动作、
 `ChargeInventorySync`=142 装药库存、`ChargeButtonSync`=143 Button Dispencer 掩码）。
 
@@ -272,8 +294,9 @@ currentSelectedCharges）+ **开局误激活修复**（移除 Tick 补激活链�
 | 文件 | 职责 |
 |---|---|
 | `Core/CoopRuntime.cs` | 平台无关核心：初始化/Startup/Shutdown、模块注册 |
-| `Core/CoopBehaviour.cs` | 唯一帧驱动（Update → net.Update）|
-| `Net/NetManager.cs` | 会话状态机、收发泵、批量合包 |
+| `Core/CoopBehaviour.cs` | 唯一帧驱动（Update → net.Update；同时驱动 `CoopConfig.Tick` 配置热重载）|
+| `Core/Config/CoopConfig.cs` | **配置文件子系统**（标准 INI，双平台共用；热重载；模块开关，见 `docs/CONFIG.md`）|
+| `Net/NetManager.cs` | 会话状态机、收发泵、批量合包（含关键包保护表 `RegisterCriticalType`）|
 | `Net/NetworkGovernor.cs` | 网络负载分级调控器（NetQualityTier × 频率/合包/拆包动态控制，见 `docs/NETWORK_GOVERNOR.md`）|
 | `Net/NetProtocol.cs` | 消息协议、序列化、Roster |
 | `Net/ITransport.cs` | 传输抽象 |

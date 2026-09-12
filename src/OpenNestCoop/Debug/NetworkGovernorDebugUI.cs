@@ -234,7 +234,7 @@ public class NetworkGovernorDebugUI : MonoBehaviour
         try { local = net != null && net.LocalMode; } catch { }
 
         _lines.Clear();
-        _lines.Add(("[F9 循环] 网络诊断 (2/3)", "", Sk.Title));
+        _lines.Add(("[F9 循环] 网络诊断 (2/4)", "", Sk.Title));
         _lines.Add(("会话: " + state + "  成员: " + roster + (local ? "  [本地回环]" : ""), "", Sk.Normal));
         var tierSk = g.Tier switch
         {

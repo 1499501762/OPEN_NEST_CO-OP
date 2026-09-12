@@ -1,4 +1,4 @@
-# Open Nest Co-op - build and deploy to BOTH game ends (BepInEx G + MLL D).
+﻿# Open Nest Co-op - build and deploy to BOTH game ends (BepInEx G + MLL D).
 # Usage:
 #   .\scripts\deploy.ps1            # 默认双端：BepInEx(G 盘 BepInEx\plugins) + MLL(D 盘 Mods\UserLibs)
 #   .\scripts\deploy.ps1 -BepOnly   # 只部署 BepInEx 端（G 盘）

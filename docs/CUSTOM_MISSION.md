@@ -12,6 +12,7 @@
 
 ## 更新记录
 
+- 2026-08-31 新增**引擎自检集** `examples/csm_selftest/`（8 个任务覆盖全部引擎功能：输出/等待/随机分支、目标/解锁、计时器/分支/并行/事件/汇合、地图实体、脚本化内置模块/奖励/Custom、脚本挂起/条件、原生格式、前置后置）+ §16.6 自检验证小节。
 - 2026-08-23 初稿：任务框架（图引擎 + JSON/脚本定义 + 桥接 + 前置后置 + 同步序号）设计文档。
 - 2026-08-23 新增「游戏侧对接发现」节（MissionMapLoader / MissionSaveManager / ResourcesModule 限制 + 反编译工具链，源自 UI 调研交接）。
 - 2026-08-23 默认宿主新增 `LoadMapSprite`（走 `MissionMapLoader.Acquire`，`Il2CppSystem.Action<Sprite>` 经 `DelegateSupport.ConvertDelegate` 桥接）。
@@ -33,6 +34,8 @@
 - 2026-08-25 新增**原生生成节点取证 + 敌人生成修复**（13.5 节）：`DumpSpawnNodes` dump 当前图所有 `State_SpawnMapEntity` 完整字段（Role/Health/NumberToSpawn/LocationToSpawn.ZoneID 等）；原生 SiegeOfCartagena 13 生成节点取证（`Role` 复合枚举 + `zone='EnemyFrontline'` 等场景预置 Zone 名 + `fuzzy`）。**图启动修复**：`StartOperation` 后 `StartMissionRuntime` 不建立主执行线（CurrentState null）→ `OncMissionHooks.PostMissionLoaded` 对 native 自定义图调 `graph.Run()` 启动。**`State_Objective` 中断图**：NodeData 缺 `Objective` 引用 → 图无法推进到生成节点；killwave 已移除 Objective 节点 → `State_SpawnMapEntity` 正常执行（`entities=5`，`complete=True`）。
 - 2026-08-25 联机同步接入（`MissionSync` 102 / `MissionSyncV2` 227）：主机广播自定义任务 `@c:<MissionID>` 前缀（`GetMissionId` 对 `IsNativeCustomGraph` 图返回前缀 ID），客机 `TryLoadMissionScene` 对 `@c:` 走 `OncMissionBridge.StartNative(id)`——按 ID 启动，**不再模拟点击原生 MapCard**（自定义任务 scene 名如 "Mission tutorial 4" 与原生同名会撞卡片进错任务）；主机广播任务图当前节点 nodeId（原生图 `CurrentState.Node.NodeID`，同步序号）；主机收到 `@c:` 不覆盖 `CurrentMissionSceneName`（防缓存污染）。Core：`OncMissionSyncState` 补 `DoneNodeIds` + `OncMissionRuntime.ApplySyncState` 闭环 `BuildSyncState`（Core 引擎任务联机用）。
 - 2026-08-25 修复**自定义任务 HUD 泄漏到原生任务**（13.6 节）：自定义任务信息窗口（`OncMissionHud`，`UiKit` Canvas sortingOrder=32000、DontDestroyOnLoad、右下角）只应在自定义引擎任务（`Start`/`StartRuntimeInScene` 的 `_current` runtime `IsRunning`）时显示——若自定义引擎任务**中途退出未正常完成**（runtime 未 Stop），`_current` 残留 `IsRunning`，HUD 每帧 `Refresh` 持续显示；之后进入原生任务时 HUD **错误弹出**（`_current == null` 分支的 `Hide()` 不会执行）。修复：`OncMissionBridge.Update` 在刷新前加**离开任务守卫**——`_current.IsRunning` 但 `MissionManager.CurrentPhase != (GamePhase)2`（任务中）→ 调 `Stop()`（内部清 `_current` + `OncMissionHud.Hide()`）后 return。验证：自定义任务运行中（phase=2）守卫不触发、HUD 正常；退出到选任务/主菜单（phase≠2）→ 立即 Stop + Hide → 原生任务不再弹出。
+- 2026-08-30 **脚本化模块（本分支核心）**（第 15 节）："在原生的 Node 任务引擎上引入脚本化模块"——新增 `OncNodeKind.Scripted`（按 `ModuleName` 分派到宿主注册的 C# 脚本模块 / JSON 参数），原生侧经 **`State_CustomTrackingVariable` 载体**（`variableName="onc.script.<name>"`）或**节点 ID `onc_script_<name>`** 触发。`OncMissionBridge.RegisterScriptedModule(name, Action<OncScriptContext>)` 注册；原生图每帧轮询 `CurrentState` 检测锚点（纯读取零 Harmony 风险）。同步补齐 `OncMissionImporter` 节点数据导出（全部 OncNodeKind → 原生 State_* 正确 NodeData，按权威 61 节点目录）→ `docs/NODE_CATALOGUE.md`（48 State_* + 13 Event_* 完整目录 + 字段速查）。
+- 2026-08-31 文档 ↔ 代码核对（Core 重构后）：第七节接口清单补 `LoadMapSprite` 与生命周期 5 回调；第三节补 JSON `Kind` 别名说明（`"Print"` → `Teleprinter`，`ParseKind` 大小写不敏感，未知名回退 `Custom`）；第八节补 Builder 快捷构建战役 `BuildOperation`。均以 `src/OpenNestCore/Tasks/*.cs` 为准核对。
 
 
 ## 一、为什么抽象（定位）
@@ -80,6 +83,9 @@
 
 > `Custom` 节点：C# 脚本定义时直接挂 `Action<OncMissionContext>` 回调（最灵活）；JSON 定义时用
 > `CustomData` 字符串，由宿主/模组解释执行。
+>
+> JSON 里节点 `Kind` 用枚举名（如 `"Teleprinter"`），并支持别名 `"Print"` → `Teleprinter`
+> （`OncMissionIO.ParseKind` 大小写不敏感，未知名回退 `Custom`）。
 
 ## 四、定义方式一：JSON 任务文件
 
@@ -201,10 +207,11 @@ var sync = runtime.BuildSyncState();                  // 联机"同步序号"负
 
 ### 接口 `IOncMissionHost`（Core 定义契约，游戏侧实现）
 
-生命周期 / `LoadMissionScene` / `IsMissionUnlocked` / `ApplySeed` / `ShowNotification` /
+生命周期（`OnMissionStarted` / `OnNodeEntered` / `OnMissionCompleted` / `OnMissionFailed` /
+`OnMissionCanceled`）/ `LoadMissionScene` / `IsMissionUnlocked` / `ApplySeed` / `ShowNotification` /
 `PrintTeleprinter` / `SendSceneNotification` / `SpawnEntity` / `MoveEntity` / `DamageEntity` /
 `SetEntityState` / `TriggerImpact` / `IsEntityDestroyed` / `AddRequisitionPoints` / `AddShell` /
-`AddPowderCharge` / `UnlockSceneObject`。继承 `OncMissionHostAdapter`（空实现）只覆写需要的。
+`AddPowderCharge` / `UnlockSceneObject` / `LoadMapSprite`。继承 `OncMissionHostAdapter`（空实现）只覆写需要的。
 
 ### `OncMissionBridge`（OpenNestCoop 游戏侧，默认宿主）
 
@@ -239,6 +246,8 @@ OncMissionBridge.MarkMissionCompleted("custom.intro");    // 标记完成（前�
 - **战役级**：`OncOperation.Missions`（`OncMissionRef { MissionId, Requires, Condition }`）——
   注册战役时把 `Requires` 合并到任务；任务完成（`OnMissionCompleted`）自动 `MarkMissionCompleted` 解锁后续。
 - 原生任务完成也可 `OncMissionBridge.MarkMissionCompleted("原生任务id")` 作为前置。
+- Builder 快捷构建单任务战役：`.BuildOperation("op.id")`（把当前任务包成 `OncOperation`，`Requires` 并入
+  `OncMissionRef`）。注册用 `OncMissionBridge.Register(operation)`，任务会一并注册。
 
 ## 九、联机同步（"同步序号"方案，预留）
 
@@ -584,6 +593,277 @@ try { _current.Update(dt); }
 - 图执行默认**单线程每帧驱动**；不支持宿主迁移/暂停（单机范围）。
 - 默认宿主的坐标换算（网格 X/Y → 世界坐标）与资源发放（补给点/炮弹/发射药/解锁/着弹）为占位，
   需要精确逻辑时覆写 `IOncMissionHost`。
-- 联机"同步序号"未接网络层（待任务文件规模评估）；`Custom` 节点回调不随 JSON 传输。
-- 与游戏原生 MissionManager 结算/统计（`MissionStatsTracker`）未打通（自定义任务完成走
-  `OnMissionCompleted` 通知，不写原生结算）。
+- 联机"同步序号"：**已接入变量同步**（A4，`OncMissionSyncState.Variables`）+ 脚本事件广播
+  （`MissionScriptSync`）；`Custom` 节点回调不随 JSON 传输（脚本模块用 `RegisterScriptedModule` 跨端各自注册）。
+- 结算/统计：**D 已加可选原生结算**（`NativeComplete`，需游戏实测）；默认自定义任务完成走
+  `OnMissionCompleted` 通知，不写原生结算。
+
+## 十五、脚本化模块（在原生的 Node 任务引擎上引入脚本化模块）—— 2026-08-30
+
+> **定位**：本分支核心。让**任务图里可以插入自定义脚本逻辑**——任务作者（或主模组）注册 C# 脚本模块，
+> 任务图（Core `OncNodeKind.Scripted` 节点 **或** 原生 `State_CustomTrackingVariable` 载体/`onc_script_` 锚点节点）
+> 在进入时按名分派执行。原生引擎跑原生图，脚本模块跑我们的逻辑，互不干扰（**只读轮询 CurrentState，零 Harmony 风险**，
+> 不碰状态机内部——遵循"只 patch 流程方法"纪律）。
+
+### 15.1 概念
+
+- **脚本模块（Scripted Module）**：一个命名 C# 回调 `Action<OncScriptContext>`，注册进
+  `OncMissionBridge.RegisterScriptedModule(name, fn)`。被任务图里的脚本锚点触发。
+- **`OncNodeKind.Scripted`**（Core 节点）：`ModuleName` 分派键 + `ModuleArgs`（JSON 字符串）参数。
+  - 运行时（`OncMissionRuntime`）执行时调 `Host.RunScriptedModule(ctx)` → 默认宿主分派到注册表。
+  - Core JSON 定义：`{ "Kind": "Scripted", "ModuleName": "announce", "ModuleArgs": "{...}" }`。
+  - C# Builder：`OncMissionBuilder.Create(...).Scripted("announce", "{\"title\":\"...\"}")...`。
+- **原生脚本锚点**（`csm_native`，在原生的 Node 引擎上）：两种约定，任选：
+  1. **`State_CustomTrackingVariable` 载体**（复用原生节点）：`NodeData: { "variableName": "onc.script.<name>" }`。
+     图走到该节点 → 桥接层检测到进入 → 分派模块 `<name>`。
+  2. **节点 ID 锚点**（任意原生节点类型）：节点 `ID = "onc_script_<name>"` → 进入该节点 → 分派模块 `<name>`。
+     （不依赖 `State_CustomTrackingVariable` 是否被 importer 接受，最稳。）
+
+### 15.2 用法
+
+```csharp
+// 1) 主模组注册脚本模块（启动时）
+OncMissionBridge.RegisterScriptedModule("announce", ctx =>
+{
+    var args = ctx.Args; // JSON 字符串（Core 节点传参）；原生锚点为 null
+    // ctx.Host / ctx.Runtime / ctx.Variables 可用；ctx.Raise("event") 可驱动图分支
+    ctx.Host?.ShowNotification("脚本模块", "announce 已执行", 4f);
+});
+OncMissionBridge.RegisterScriptedModule("ping", ctx => CoopLog.Info("script", () => "ping!"));
+
+// 2a) Core 任务用 Scripted 节点
+OncMissionBuilder.Create("custom.scripted")
+    .Scripted("announce", "{\"title\":\"任务开始\"}")
+    .Wait(5f)
+    .Scripted("ping")
+    .End()
+    .Build();
+// 2b) 原生 JSON：见 examples/csm_native/01_05_scripted.json（两种锚点都有）
+```
+
+**`OncScriptContext`**（继承 `OncMissionContext`）：`ModuleName` / `Args` / `Mission` / `Runtime` /
+`Host` / `Variables` / `Time` / `Raise(eventId)`。原生锚点触发时 `Mission`/`Runtime` 为 null
+（原生图由原生引擎跑，脚本模块只拿 Host 做事）。
+
+### 15.3 实现要点
+
+- Core：`OncNodeKind.Scripted` + `OncNode.ModuleName/ModuleArgs` + `OncScriptContext` +
+  `IOncMissionHost.RunScriptedModule`（`OncMissionRuntime.RunAction` 执行）+
+  `OncMissionIO` 序列化 `ModuleName/ModuleArgs`。
+- Bridge：`RegisterScriptedModule` / `RunScriptedModule`（分派注册表）/ `ScanNativeScriptedNodes`
+  （`RegisterNativeFromJson` 时从 raw JSON 扫锚点，Import 前——不依赖 ImportMission 字段还原）/
+  `PollNativeScripted`（`Update` 每帧轮询 `CurrentState.Node.NodeID`，进入锚点分派）。
+- 原生载体：`OncMissionImporter.ExportNodeData` 对 `Scripted` 输出 `State_CustomTrackingVariable`，
+  `variableName="onc.script.<name>"`、`CustomVariableKey=<name>`。
+- 未注册的模块名 → 只日志不中断任务。
+
+### 15.4 同批补齐：`OncMissionImporter` 节点数据导出（全部 OncNodeKind → 原生 State_*）
+
+权威节点目录见 `docs/NODE_CATALOGUE.md`（48 `State_*` + 13 `Event_*` = 61，与参考模组一致）。本次：
+- 修正 `MapNodeType`（`WaitTimerExpired`→`State_GenericTimer`、`ObjectiveComplete/Fail`→`State_Objective`、
+  `Scripted`→`State_CustomTrackingVariable` 等）。
+- 补全 `ExportNodeData`：`Teleprinter`（OnlyQueue/WaitUntilComplete/AlarmState/EntityIDToReplace）、
+  `SpawnEntity`（Role 复合枚举/Icon/NumberToSpawn/Scale/SetContextVariable/LastSpawnedEntity/
+  LocationToSpawn/ImmuneShells，Role 别名解析：Target→131617、Ally→6、Enemy→33）、
+  `WaitEntityDestroyed`（Entites TargetSelection）、`MoveEntity`（LocationToMoveTo）、
+  `SetEntityState`（StateToAdd/StateValue）、`Impact`（LocationHit）、`SceneNotification`（NotifID）、
+  `UnlockSceneObject`（UnlockedSceneObjects）、`WaitForEvent`（NotificationID）、`Scripted`（载体）。
+- 参考模组样例 `ref/mission editor/Docs/Observador.definition.json` 提供精确字段结构。
+
+### 15.5 待办
+
+- `State_CustomTrackingVariable` 是否被 importer 接受待实测（若是被拒的 7 个之一 → 只用节点 ID 锚点）。
+- `Scripted` 原生载体的 `CustomVariableKey` 语义（枚举？）待实测；当前作为模块名冗余存储。
+- 脚本模块联机：目前两端各自跑（原生图两端同 seed 一致触发；模块逻辑需幂等）。
+- `State_Objective` 仍缺 ObjectiveGraph 引用（断图）；`State_ConditionBranch` 条件字段待验证。
+
+### 15.6 游戏事件桥接（A）+ 脚本模块事件订阅（B）—— 2026-08-30
+
+> 解决上一节评估的缺口：脚本模块不再只是"节点进入跑一次"，还能**订阅游戏事件异步响应**
+> （多次、可持续）。事件管线：**游戏 Harmony hook（A）→ `OncMissionBridge.Raise` → ①Core 图
+> `WaitForEvent`/`Branch` ②脚本模块事件订阅表（B）分派**。
+
+**A 方案（事件桥接，`OncMissionEventHooks` + 复用 HarmonyPatches）**——把关键游戏事件喂给桥接层（postfix/prefix 全 try-catch，
+放行原方法，不改变游戏行为；与联机同步 patch 并存）：
+
+| 事件 id | 载荷 | 来源 |
+|---|---|---|
+| `mission.started` | 任务 id | `OncMissionHooks.PostMissionLoaded` |
+| `mission.finished` / `mission.completed` / `mission.failed` / `mission.reloaded` / `mission.map` / `mission.menu` | bool（completed/failed 静默标志） | `MissionManager.*` postfix |
+| `shell.landed` | 落点 `Vector2` | `ImpactTracker.EvaluateImpact` |
+| `interact.click` | 交互对象完整路径 | `LookAtTarget.OnClickDown` |
+| `interact.slot` | slot 序号 | `LookAtTargetUnlockSequence5.HandleSlotClicked` |
+| `gun.fired` | — | `GunController.FireShell` |
+| `requisition.spent` | — | `RequisitionSlot.AttemptRequisition` |
+| `notification.shown` | 标题 | `UINotificationManager.ShowNotification` |
+| `teleprinter.printed` | — | `Teleprinter.SubmitLines` |
+| `counterbattery` | — | `CounterBatteryCinematicImpactSpawner.SpawnOne` |
+| `turret.moved` | 世界坐标 Vector3 | `TurretController.MoveTurret/SetTurretLocation` |
+| `timer.expired.<id>` / `timer.expired` | 计时器 id | **A2**：Core runtime 计时器归零 → `Host.OnTimerExpired` |
+| `entity.destroyed.<id>` / `entity.destroyed` | 实体 id | 轮询 `FireMission.Entities`（订阅了 `entity.destroyed` 前缀才工作） |
+
+**B 方案（脚本模块事件订阅 API）**：
+
+```csharp
+OncMissionBridge.RegisterScriptedModule("on_event", ctx =>
+{
+    // ctx.Event 非 null：事件钩子触发
+    var e = ctx.Event;                       // OncScriptEvent { EventId, Payload }
+    ctx.Host?.ShowNotification("事件", "收到 " + e.EventId, 4f);
+});
+// 订阅：游戏事件 → 脚本模块（可多次/可异步/可持续）
+OncMissionBridge.RegisterScriptedHook("mission.started", "on_event");
+OncMissionBridge.RegisterScriptedHook("shell.landed", "on_event");
+OncMissionBridge.RegisterScriptedHook("entity.destroyed.EnemyWaveA", "on_event");
+```
+
+- `OncScriptContext.Event`（`OncScriptEvent { EventId, Payload }`）——事件钩子触发时非 null；
+  节点触发（`Scripted` 节点/原生锚点）时为 null。
+- `Raise(eventId, payload)` 现在统一分派：喂 Core 图 + 分派 B 订阅表（旧"只喂 `_current`"版本已合并）。
+- 事件 id 精确匹配；模块须先 `RegisterScriptedModule` 注册。
+
+**⚠️ 事件源选择纪律（A+B vs C 原生 `Event_*`）**：同一任务、同一事件**只选一条事件轨**——
+Core 引擎任务走 A+B；原生格式任务 **C 原生 `Event_*` 为主**、B 为兜底（当 `Event_*` 导入被拒时）。
+同一事件同时接 C 的节点和 B 的订阅会**双触发**（模块跑两次）。详见 `docs/NODE_CATALOGUE.md` 第五节。
+### 15.7 脚本化模块全量扩展（A2-A4 / B1-B6 / D）—— 2026-08-30
+
+> 在 15.6 事件桥接（A）+ 事件订阅（B）基础上，补齐"需要接入 + 可以接入"清单。
+
+**A2 计时器到期全局事件**：Core runtime 计时器归零 → `Host.OnTimerExpired` → `timer.expired.<id>` / `timer.expired`
+事件（脚本模块可订阅；对应原生 `Event_OnGenericTimerReachedTime`）。`OncMissionRuntime.OnTimerExpired` 事件也可直接订阅。
+
+**A3 原生图变量桥接**：原生锚点触发脚本模块时，把当前原生 `MissionGraph.Variables` **快照**进 `ctx.Variables`
+（脚本模块可读原生变量做决策）；写回用 `OncMissionBridge.SetNativeGraphVariable(name, value)`
+（⚠️ 类型经 interop，需游戏实测）。
+
+**A4 脚本模块联机**：
+- **变量同步**：`OncMissionSyncState` 新增 `Variables`（字符串化），`BuildSyncState`/`ApplySyncState`/`OncMissionIO`
+  闭环——Core 任务变量可随"同步序号"负载跨端对齐。
+- **事件广播**：`OncScriptContext.Broadcast(eventId)` → 默认宿主 → `MissionScriptSync`（**函数注册通道**
+  `mission.script.event`，MsgType 由 NetManager 注册管理器统一分配，不再硬编码枚举）——主机权威广播脚本事件，
+  客机收到后本地 `Raise`。⚠️ **游戏事件驱动时用本地 `Raise`**（两端本地自然触发，广播会双触发）；
+  `Broadcast` 只用于自定义/主机逻辑事件需要跨端一致时。
+
+**B1 脚本化条件节点（`ScriptedCondition`）**：进节点问脚本模块布尔结果（`ctx.BoolResult`），true 走 `To[0]`、
+false 走 `To[1]`。运行时 `CompleteNodeAt` 只激活选中出边。对应原生 `State_ConditionBranch`。
+
+**B2 脚本化挂起节点（`ScriptedWait`）**：像 `WaitForEvent` 留在激活表，每帧问脚本模块"好了没"
+（`ctx.BoolResult` = true 才完成）。适合等玩家做复杂操作。
+
+**B3 脚本模块生命周期钩子**：`RegisterScriptedModule(name, fn, onMissionStarted, onMissionEnded)`——任务启动/结束时
+（`OncMissionBridge` 挂接 `AttachScriptedLifecycle`）调用，模块可初始化/清理状态。
+
+**B4 事件载荷类型化**：`OncScriptEvent` 提供 `PayloadAs<T>()` / `AsString()` / `AsInt()` / `AsFloat()` / `AsBool()`
+（载荷为落点 Vector2 / 实体 id / 对象路径 / bool 等）。
+
+**B6 声明式 JSON 内置模块库**：JSON `ModuleName` 直接可用（无需 C# 注册）：`announce`（通知）、`print`（打字机，
+args `{"text":...}`）、`requisition`（加补给点，`{"amount":...}`）、`shell`（加炮弹，`{"shell":...,"amount":...}`）、
+`powder`（加发射药，`{"amount":...}`）、`log`、`ping`。
+
+**D 原生结算（可选）**：`OncMission.NativeComplete`（JSON `"NativeComplete": true`，Builder `.WithNativeComplete()`）——
+Core 引擎任务完成/失败时额外调原生 `MissionManager.MarkMissionComplete/MarkMissionFailed` 记原生结算。
+⚠️ 原生格式任务本身已走原生结算，无需此字段；Core 任务用需游戏实测。
+
+**D2 任务完成走原生返回（2026-08-30 实测定案）**：Core 任务完成后**必须走原生返回流程**（`OnMissionCompleted/Failed`
+→ `OncMissionBridge.TryNativeReturn`：用 `OncMissionImporter.ExportMission` 导出原生图 → 设 `MissionManager.CurrentOperation`
+（含 MissionNode.Mission=图）+ `CurrentMission` → 调 `MarkMissionComplete/MarkMissionFailed`）——原生结算界面
+（EndOfMissionUIController）正常显示并 dismiss 返回，**原生引擎的结算/统计参数传递完整**。
+⚠️ 关键坑（实测）：Core 任务没走 `StartOperation` 时 `CurrentOperation` 为 null，结算界面 dismiss 回调断裂
+会**卡死**（表现：完成后面临"结束界面"无法返回）；且**不能**简单 `LoadMainMenu` 直接跳（跳过原生结算，参数失效）。
+故完成时手动构造原生上下文再触发原生结算。
+
+**消息类型函数注册**：新增联机消息不再硬编码 `MsgType` 枚举——用稳定 channelKey 自注册
+（`CoopSyncRegistry.PendingRegister` / `NetManager.RegisterChannel`），由 NetManager 统一分配前导字节
+（1 字节用尽自动扩 2 字节，见 `NetProtocol.HeaderWidth`）。参考 `CoffeeSync` / `MissionScriptSync`。
+
+**示例**：`examples/csm/01_06_events.json`（A：Branch 等游戏事件）、`01_07_scripted_flow.json`
+（B1/B2/A2：Scripted/ScriptedWait/ScriptedCondition + 计时器）、`examples/csm_native/01_07_event_template.json`
+（C：原生 Event_* 接线模板，⚠️ 待实测）。
+
+## 十六、如何测试（Testing Guide）—— 2026-08-30
+
+> 教程式任务见 `examples/csm_tutorial/`（README 逐步讲解）；**引擎自检集见 `examples/csm_selftest/`**
+> （8 个任务覆盖全部引擎功能，见 §16.6）；这里是通用测试流程 + 验证点 + 日志键。
+
+### 16.1 测试前置
+
+- **构建**：`. .\scripts\env.ps1; dotnet build src\OpenNestCoop\OpenNestCoop.csproj -c Release`
+  （BepInEx G 端）+ `. .\scripts\env.ps1; dotnet build src\OpenNestCoop.MelonMod\OpenNestCoop.MelonMod.csproj -c Release`（MLL D 端）。
+- **部署**：`.\scripts\deploy.ps1`（双端）；或 `-BepOnly` / `-MllOnly`。
+- **放任务**：把要测的 JSON 复制到游戏根目录 `CSM/`（`C:\Iron Nest Heavy Turret Simulator\CSM\`）。
+  ⚠️ 游戏运行中 DLL 无法覆盖——先关游戏再部署。
+- **单人/双人**：`.\scripts\dualtest.ps1 -local`（免虚拟机双开）；也可直接启动游戏单测。
+- **日志**：主日志 `BepInEx\LogOutput.log` / MLL 端 `OpenNestLogs\`（独立文件）+ 游戏 `Player.log`
+  （`%USERPROFILE%\AppData\LocalLow\Iron Nest\...`）。诊断日志键以 `onc.mission.*` 前缀。
+
+### 16.2 启动验证链（每类任务看什么）
+
+| 任务类型 | 注册日志 | 启动后看 | 结束看 |
+|---|---|---|---|
+| Core JSON（csm/） | `OncMission registered: '<id>'` | 任务 HUD（右下角）+ 打字机/通知按节点执行 | `OncMission completed/failed '<id>'` |
+| 原生 JSON（csm_native/） | `OncMission native registered: '<id>'` | `OnMissionLoaded fired` + `graph.Run()` + 原生节点执行（打字机/实体） | `State_End` / 原生任务完成 |
+| 脚本化模块（Scripted 节点/锚点） | `scripted module registered: '<name>'` | 进节点时 `scripted module ran: '<name>'` | — |
+| 事件订阅（B） | `scripted hook: '<event>' -> module '<name>'` | 事件触发时 `scripted module ran`（含 `ctx.Event.EventId`） | — |
+| 原生脚本锚点 | `scripted anchor node '<id>' -> module '<name>'` | 进锚点节点时 `native scripted anchor entered` | — |
+
+### 16.3 逐功能验证点
+
+- **节点流转（基础）**：日志 `OncMission node '<id>' kind=...`（每节点进入）→ 确认图按 `To` 连线推进。
+- **打字机**：`TeleprinterText` 节点 → 打字机出字；`OnlyQueue=false` 应立即打。
+- **实体生成/摧毁**：`SpawnEntity` → `OncMission spawned '<id>'`；`WaitEntityDestroyed` 挂起
+  （`flow: main='w1' entities=1 stay=...`）；击杀后推进（`entity.destroyed` 事件若有订阅）。
+- **事件桥接（A）**：`Branch` 等 `shell.landed` → 开一炮看命中日志 `[ImpactDiag] EvaluateImpact` +
+  Branch 推进到 `hit`；等 `mission.completed` 需先触发任务完成。
+- **计时器（A2）**：`StartTimer` → 归零时日志 `timer.expired.<id>`（有订阅才可见分派）。
+- **脚本化条件/挂起（B1/B2）**：`ScriptedCondition` 按 `BoolResult` 走 `To[0]/To[1]`；
+  `ScriptedWait` 挂起直到模块置 `BoolResult=true`（模块内日志确认每帧轮询）。
+- **原生变量桥接（A3）**：原生锚点触发时 `ctx.Variables` 含原生图变量（模块内读值日志）；`SetNativeGraphVariable` 写回需实测。
+- **联机脚本事件（A4）**：主机模块调 `ctx.Broadcast` → 客机日志 `script event broadcast`/客机本地 `scripted module ran`。
+- **原生格式（csm_native）**：`OnMissionLoaded` 后 `graph.Run()` 建立主执行线；`State_SpawnMapEntity.OnEnter`
+  执行（`entities=N`）；打字机 token（`[GRID]` 等）被替换。
+- **原生 Event_*（C 模板）**：`examples/csm_native/01_07_event_template.json` 加载后看 `State_WaitForNotification`
+  是否被 `Event_OnNotification` 唤醒（⚠️ 待实测；若 Event_* 被 importer 拒绝则只有日志无节点）。
+
+### 16.4 关键日志键（`CoopLog` key → 显示前缀 / 文件）
+
+- **独立文件**：`OpenNestLogs/mission.log` 收集全部 `onc.mission.*` + `mission.diag`（节点诊断 UI 周期 dump）；
+  `frame.log`（帧诊断）、`net.log`（网络）、`sync.log`（联机/落点/照片/装填诊断）。
+- **F9 循环页**：`不显示 → 帧性能 → 网络 → 任务节点 → 交互工具 → 不显示`（页序号 1/4~4/4）。**任务节点页**
+  （`MissionGraphViewUI`，右上角头部 + 全屏节点图）：
+  - **节点图可视化**：任务图每个节点渲染为方框（id + kind + 关键内容：等待秒/事件/计时器/实体/脚本模块/目标等），
+    按运行状态着色（✔完成绿 / ▶激活黄 / ·待执行灰）；**按 To 出边画连线 + 方向箭头**展示节点逻辑关系；
+  - **交互**：滚轮缩放（以光标为中心）、右键/中键拖拽平移、**左键点选节点**、悬停高亮；
+  - **检查器**：点选节点后左上角显示全部字段（From/To 连线、Routes、各参数）+ 目标/计时器摘要；
+  - 顶部：任务总览（id/状态/耗时/完成/激活节点数）；无 Core 任务时显示原生图 CurrentState。
+  显示时每 5s dump 到 `mission.log`（key=mission.diag，含节点状态 + 连线）。
+- 其他键：`onc.mission.reg/start/update/hud/override/script/native/diag`、`onc.host.*`、`impact.diag`、
+  `[OncCard]`（选任务面板卡片）、`[RegMgr]`（动态通道分配）。诊断日志可在游戏内 F9 循环面板查看。
+
+### 16.6 一键自检集（examples/csm_selftest）—— 2026-08-31
+
+> **最小化测试集**：8 个任务覆盖全部自定义任务引擎功能。全部通过 → 每任务自动 `End` 成功
+> （打字机 `[自检N] ... OK`）；有功能异常 → 卡住或走 `Fail`，据此定位。
+> 机制/覆盖矩阵/验证要点/自检6 的 C# 模块见 `examples/csm_selftest/README.md`。
+
+| 任务 | 覆盖 |
+|---|---|
+| 自检1 | Start/Print/Notify/SceneNotification/WaitSeconds/WaitForEvent(超时)/RandomBranch/End |
+| 自检2 | Objective(Start/AddProgress/SetProgress 自动完成)/ObjectiveComplete/UnlockSceneObject/End |
+| 自检3 | Split(并行)/StartTimer/AddTimerTime/PauseTimer/ResumeTimer/WaitTimerExpired/Branch(事件+超时→Fail)/A2 timer.expired/多入边汇合/End |
+| 自检4 | SpawnEntity/MoveEntity/SetEntityState/Impact/DamageEntity(致死)/WaitEntityDestroyed/End |
+| 自检5 | Scripted 内置模块(print/requisition/shell/powder/log/announce,B6)/Custom 空跑/AddRequisitionPoints/AddShell/AddPowderCharge/End |
+| 自检6 | ScriptedWait(挂起)/ScriptedCondition(布尔→To[0]/To[1])/End/Fail（需注册 selftest_wait/selftest_cond）|
+| 自检7 | 原生格式：State_Start→State_TeleprinterText→State_WaitSeconds→State_End（原生 ImportMission/StartOperation）|
+| 自检8 | 前置/后置：B.Requires=[A]，完成 A 后 B 才解锁 |
+
+验证：把 `examples/csm_selftest/selftest_*.json` 复制到游戏根目录 `CSM/` → 逐个启动 → 全部自动 End；
+F9 任务节点页看节点图流转，`mission.log` 看 `OncMission completed 'selftest.*'`。
+自检6 若不注册模块，默认按 true 兜底也会 End（验证引擎默认路径，注册后验证 B1/B2 真分支）。
+
+### 16.5 常见排查
+
+- **卡片不出现**：确认 JSON 在 `CSM/` 且格式正确（单个解析失败只跳过）；看 `[OncCard] built N custom 3D card(s)`。
+- **任务不推进**：看 `OncMission node` 卡在哪个节点；`WaitForEvent` 无事件喂 → 挂起是正常的（检查事件源/订阅）。
+- **脚本模块未执行**：确认 `RegisterScriptedModule` 已注册（`scripted module registered`）且模块名拼写一致；
+  未注册 → `scripted module not registered: '<name>'`。
+- **原生图不启动**：看 `OnMissionLoaded` 是否触发 + `graph.Run()` 是否建立主执行线（`after Run() state=...`）。

@@ -1,0 +1,21 @@
+{
+  "Id": "selftest.02.objective",
+  "DisplayName": "自检2 目标/解锁",
+  "Description": "覆盖：Objective(Start/AddProgress/SetProgress 自动完成) / ObjectiveComplete / UnlockSceneObject / End。目标进度到 Target 自动 Completed。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Objectives": [
+    { "Id": "t", "Title": "自检目标", "Type": "test", "Target": 3 }
+  ],
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Objective", "ObjectiveId": "t", "ObjectiveAction": "Start", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Objective", "ObjectiveId": "t", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["n4"] },
+    { "Id": "n4", "Kind": "Objective", "ObjectiveId": "t", "ObjectiveAction": "AddProgress", "Value": 1, "To": ["n5"] },
+    { "Id": "n5", "Kind": "Objective", "ObjectiveId": "t", "ObjectiveAction": "SetProgress", "Value": 3, "To": ["n6"] },
+    { "Id": "n6", "Kind": "UnlockSceneObject", "NotifId": "selftest.02.unlock", "To": ["n7"] },
+    { "Id": "n7", "Kind": "ObjectiveComplete", "ObjectiveId": "t", "To": ["n8"] },
+    { "Id": "n8", "Kind": "Print", "Message": "[自检2] 目标进度+自动完成+解锁 OK", "To": ["n9"] },
+    { "Id": "n9", "Kind": "End" }
+  ]
+}

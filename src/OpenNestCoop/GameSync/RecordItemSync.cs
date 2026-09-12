@@ -14,7 +14,11 @@ namespace OpenNestCoop.GameSync;
 /// </summary>
 public sealed class RecordItemSync : ISyncedModule
 {
-    public byte MsgType => 108;
+    public int MsgType => 108;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V1 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(false, () => new RecordItemSync());
     private const float Interval = 0.2f;
     private float _timer;
     private bool _applying;

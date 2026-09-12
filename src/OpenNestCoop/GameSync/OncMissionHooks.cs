@@ -37,6 +37,10 @@ public static class OncMissionHooks
         TryPatch(typeof(SleepyNodes.MissionGraph), "OnMissionLoaded", postfix: nameof(PostMissionLoaded));
         // 自定义任务卡片注入选任务面板（MapCardManager.UpdateMapCards postfix + MapCard.ActivateMission prefix）
         OncMissionCardInjector.Apply();
+        // ⚠️ 脚本化模块事件桥接（A 方案）：mission.* / shell.landed / interact.click → OncMissionBridge.Raise
+        // （entity.destroyed 走 OncMissionBridge.PollEntityDestroyed 轮询，无需 Harmony）
+        try { OncMissionEventHooks.Apply(); }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"OncMissionEventHooks apply: {ex.Message}"); }
     }
 
     private static void TryPatch(Type target, string method, string prefix = null, string postfix = null)
@@ -124,6 +128,8 @@ public static class OncMissionHooks
             // 协同事件（自定义任务可 WaitFor("native.mission.loaded.<id>")）
             OncMissionBridge.Raise("native.mission.loaded." + id);
             OncMissionBridge.Raise("native.mission.loaded");
+            // 任务启动事件（脚本模块事件订阅 B 方案可用：OncMissionBridge.RegisterScriptedHook("mission.started", ...)）
+            OncMissionBridge.Raise("mission.started", id);
         }
         catch { }
     }

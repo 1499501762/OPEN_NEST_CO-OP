@@ -1,0 +1,18 @@
+{
+  "Id": "selftest.01.output",
+  "DisplayName": "自检1 输出/顺序/等待",
+  "Description": "覆盖：Start / Print(打字机) / Notify / SceneNotification / WaitSeconds / WaitForEvent(超时) / RandomBranch / End。全部通过应自动 End。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:MissionBase",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "[自检1] 打字机输出 OK", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Notify", "Title": "[自检1] 通知", "Message": "通知 OK", "Duration": 3, "To": ["n4"] },
+    { "Id": "n4", "Kind": "SceneNotification", "NotifId": "selftest.01.notif", "To": ["n5"] },
+    { "Id": "n5", "Kind": "WaitSeconds", "Seconds": 1, "To": ["n6"] },
+    { "Id": "n6", "Kind": "WaitForEvent", "EventId": "selftest.noop", "Timeout": 2, "To": ["n7"] },
+    { "Id": "n7", "Kind": "RandomBranch", "To": ["n8"] },
+    { "Id": "n8", "Kind": "Print", "Message": "[自检1] 全部通过（输出/等待/随机分支/场景通知）", "To": ["n9"] },
+    { "Id": "n9", "Kind": "End" }
+  ]
+}

@@ -32,7 +32,12 @@ public sealed class ReloadSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2ReloadState;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2ReloadState;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案，含附加类型 210/214），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance, null, null,
+        (byte)OpenNestCoop.Net.MsgType.V2ReloadCmd, (byte)OpenNestCoop.Net.MsgType.V2ReloadSnapshotReq);
 
     /// <summary>粉末事件 id（EventLayer 通道）。</summary>
     public const string PowderEventId = "v2/reload/powder";

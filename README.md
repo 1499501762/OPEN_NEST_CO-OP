@@ -63,7 +63,10 @@ See [docs/API.md](docs/API.md) for the full API reference.
 - [Lobby Guide](docs/LOBBY.md) — Steam lobby: room password, mod version check/label, handshake protocol
 - [Native UI Study](docs/NATIVE_UI.md) — game UI internals + `OpenNestCore.UI` abstraction (UiKit/IronNestNativeUi)
 - [Task System Study](docs/TASK_SYSTEM.md) — the game's SleepyNodes node-graph mission engine
-- [Custom Mission Framework](docs/CUSTOM_MISSION.md) — `OpenNestCore.Tasks` JSON/script mission engine + bridge
+- [Custom Mission Framework](docs/CUSTOM_MISSION.md) — `OpenNestCore.Tasks` JSON/script mission engine + bridge (含第 15 节脚本化模块、第 16 节如何测试)
+- [Native Node Catalogue](docs/NODE_CATALOGUE.md) — 61 个原生任务节点（48 State_* + 13 Event_*）+ 字段速查
+- [任务教程 examples/csm_tutorial](examples/csm_tutorial/README.md) — 7 课由浅入深：基础流程 → 目标/计时 → 事件分支 → 实体 → 脚本化模块 → 条件/挂起 → 原生格式
+- [引擎自检集 examples/csm_selftest](examples/csm_selftest/README.md) — 8 个最小任务覆盖全部自定义任务引擎功能（含覆盖矩阵与验证要点）
 - [双开自动联机测试](scripts/dualtest.ps1) — 带参数启动 host + client 自动联机（Steam 或本地回环）
 
 ## Auto-Join CLI (testing)

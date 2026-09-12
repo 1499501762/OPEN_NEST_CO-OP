@@ -21,7 +21,11 @@ public sealed class PurchaseSyncV2 : ISyncedModule
     private IHostStore Store => HostDataLayer.Instance;
     private NetManager _net => CoopRuntime.Net;
 
-    public byte MsgType => (byte)OpenNestCoop.Net.MsgType.V2Purchase;
+    public int MsgType => (byte)OpenNestCoop.Net.MsgType.V2Purchase;
+
+    // ⚠️ 模块自注册：程序集加载时入队（V2 方案），Startup FlushPending 统一注册
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void SelfRegister() => CoopSyncRegistry.PendingRegister(true, () => Instance);
 
     /// <summary>应用远端购买事件时的防环（Harmony patch 据此不重复上报）。</summary>
     public static bool IsApplying;

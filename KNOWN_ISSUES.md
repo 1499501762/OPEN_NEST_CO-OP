@@ -49,6 +49,20 @@
 | 自动加入时暂停游戏 | AutoJoin / CoopBehaviour | 加入期间 `RequestGlobalPause`，成功/失败 `ReleaseGlobalPause` | 🔄 待验证 |
 | 补给/征用点显示同步 | RequisitionSync | 弹药/发射药/库存/购买已同步；**征用点 interop 只读**（`req/points` 主机只读广播，客机界面点数不更新） | 🔄 需专门设计（写回 AntiTamper 或客机本地执行购买） |
 
+### 自定义任务（CSM）— 结算 / 床交互（2026-08-30 调试归档）
+
+> **结论**：自定义任务完成后的**原生结算/床交互仍未打通**（用户判定"还是不行"后归档停止）。
+> 已排查根因、应用两版修复（见下），但**未最终验证有效**；`examples/csm_selftest` + 本会话代码已提交 `348d3b1`。
+
+| 问题 | 归属 | 根因分析（已排查） | 状态 |
+|---|---|---|---|
+| Core 格式任务完成后**无原生结算界面**（EndOfMissionUIController 不弹） | `OncMissionBridge.TryNativeReturn` | 早期方案"设 `CurrentMissionState.Complete=true` 等玩家上床"**无效**——程序集里无独立 Bed 组件，"床"是原生引擎任务完成后的结束交互；Core 导出图的原生引擎驱动不可靠（停在 n2）。docs §D2 定案：完成时构造原生上下文（`CurrentOperation`/`CurrentMission`）+ 调 `MarkMissionComplete/Failed(true)` 触发结算界面 | 🔄 已改 D2 方案（0.8s 后触发），未验证 |
+| 原生格式任务（StartNative）**图不推进**（`current=(no state)`、打字机/床不活） | `OncMissionBridge.StartNative` | 用 **2-arg StartOperation**（无 checkpoint）→ 不触发 `StartMissionRuntime` → 原生引擎不驱动图；`graph.Run()` 建的执行线**下一帧被重置为 no state**（日志：`after Run() state=n2` → `current=(no state)` 持续） | 🔄 已改 3-arg `StartOperation + checkpoint`，未验证 |
+| n8 打字机无输出（Core 任务） | 任务时序 | Core runtime 已 DONE n8 但原生打字机未打印——原生图停在 n2 未推进到 n8；任务完成太快被结算中断 | 🔄 随上图推进修复待验证 |
+| 任务场景选择 | 任务 JSON `SceneName` | 用户确认 `Mission Chill` 为进阶空壳场景（曾黑屏）；`MissionBase` 为完整场景；`csm_native/01_01_defend` 用 Mission Chill | 🔄 待确认 3-arg StartOperation 是否生成内容 |
+
+> **调试备忘**：日志 `OpenNestLogs/mission.log`（ModLog 启动清空）；验证 DLL 需 **UTF16** 搜索（IL2CPP 字符串 UTF8 搜不到）；`graph.Run()` 建执行线需 `StartMissionRuntime` 持续驱动才持久。
+
 > ⚠️ **部署提醒**：游戏运行中无法覆盖 DLL——需关闭游戏后部署双端。
 > `ReloadSync` 消息格式（idx + stateIndex + charges），**两端必须同版本 dll**。
 

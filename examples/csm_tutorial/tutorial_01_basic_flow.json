@@ -1,0 +1,15 @@
+{
+  "Id": "tutorial.01.basic",
+  "DisplayName": "教程1 基础流程",
+  "Description": "顺序流程：打字机(Print) → 通知(Notify) → 等待(WaitSeconds) → 结束(End)。任务图 = 有向图，节点用 To 连出边，运行时按序执行。",
+  "MissionType": "Chill",
+  "SceneName": "#sym:Mission Chill",
+  "Nodes": [
+    { "Id": "n1", "Kind": "Start", "To": ["n2"] },
+    { "Id": "n2", "Kind": "Print", "Message": "教程1：这是打字机简报。", "To": ["n3"] },
+    { "Id": "n3", "Kind": "Notify", "Title": "任务开始", "Message": "5 秒后自动完成。", "Duration": 5, "To": ["n4"] },
+    { "Id": "n4", "Kind": "WaitSeconds", "Seconds": 5, "To": ["n5"] },
+    { "Id": "n5", "Kind": "Print", "Message": "基础流程完成！", "To": ["n6"] },
+    { "Id": "n6", "Kind": "End" }
+  ]
+}

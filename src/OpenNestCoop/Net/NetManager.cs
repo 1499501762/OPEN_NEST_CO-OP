@@ -128,6 +128,323 @@ public class NetManager
         State = SessionState.Idle;
     }
 
+    // ================= 注册管理（前导字节统一分配/管理 + 优先级 + 路由 + 注册表同步通道） =================
+    // 每个同步模块自行注册（静态采用 / 动态 channelKey / 函数式回调），优先级随注册一起提供（缺省有默认）；
+    // 管理器统一分配前导字节（自动避开框架枚举 / 已采用模块 / V2 200-229）、统一按前导字节路由，
+    // 并经前导字节 1（Hello 上行注册表）/2（Welcome 下发主机权威注册表）同步双端路由表。
+
+    /// <summary>注册表条目：通道键 → 前导字节（int，支持 2 字节扩展 ≥256）+ 模块 + 优先级。</summary>
+    private sealed class ChannelEntry
+    {
+        public string Key;
+        public int Type;
+        public ISyncedModule Module;
+        public NetModulePriority Priority;
+    }
+
+    /// <summary>动态通道：channelKey → 条目。</summary>
+    private readonly Dictionary<string, ChannelEntry> _channels = new();
+    /// <summary>前导字节 → 条目（统一路由表）。</summary>
+    private readonly Dictionary<int, ChannelEntry> _channelsByType = new();
+    /// <summary>已占用前导字节（框架枚举 + 静态采用 + 动态分配）。</summary>
+    private readonly HashSet<int> _usedTypes = new();
+    /// <summary>静态采用条目（硬编码 MsgType 模块；key 仅用于注册表同步展示/校验）。</summary>
+    private readonly List<(string key, int type)> _staticChannels = new();
+    private bool _reservedBuilt;
+
+    /// <summary>动态分配优先段（1 字节内首选）：230-254（V2 到 229 为止，高位空闲）、160-199、34-99。</summary>
+    private static readonly byte[][] ChannelRanges =
+    {
+        new byte[] { 230, 254 },
+        new byte[] { 160, 199 },
+        new byte[] { 34, 99 },
+    };
+
+    private void EnsureReservedTypes()
+    {
+        if (_reservedBuilt) return;
+        _reservedBuilt = true;
+        // 框架保留：MsgType 枚举全部值（1-33 / 120 / 122 / 133 / 145 / 146 / 200-229）不可被动态分配占用
+        try
+        {
+            foreach (MsgType t in Enum.GetValues(typeof(MsgType)))
+                if ((byte)t != 0) _usedTypes.Add((byte)t);
+        }
+        catch { }
+    }
+
+    // ---- 注册（模块自行注册 + 优先级；优先级缺省 = 模块 NetPriority，默认 Normal） ----
+
+    /// <summary>静态采用既有硬编码 MsgType 模块（含附加类型）：记录占用 + 优先级 + 加入统一路由表（不重新分配）。
+    /// 优先级缺省 → 取模块 <see cref="ISyncedModule.NetPriority"/>（默认 Normal）。由 CoopSyncRegistry.RegisterModule 调用。</summary>
+    public void AdoptModule(ISyncedModule module, NetModulePriority? priority = null, params byte[] extraTypes)
+    {
+        EnsureReservedTypes();
+        if (module == null) return;
+        var pri = priority ?? module.NetPriority;
+        int t = module.MsgType;
+        if (t != 0) AdoptOneChannel("S:" + module.GetType().Name, t, module, pri);
+        if (extraTypes != null)
+            foreach (var e in extraTypes)
+                if (e != 0) AdoptOneChannel("S:" + module.GetType().Name + "#" + e, e, module, pri);
+    }
+
+    private void AdoptOneChannel(string key, int t, ISyncedModule module, NetModulePriority pri)
+    {
+        _usedTypes.Add(t);
+        // ⚠️ 2026-09-12：动态/静态模块只要优先级是 Critical/High → 登记为关键类型（防合包丢弃丢包）
+        if (pri == NetModulePriority.Critical || pri == NetModulePriority.High) RegisterCriticalType(t);
+        if (!_channelsByType.ContainsKey(t))
+            _channelsByType[t] = new ChannelEntry { Key = key, Type = t, Module = module, Priority = pri };
+        foreach (var s in _staticChannels) if (s.key == key) return; // 幂等（类名+附加类型去重）
+        _staticChannels.Add((key, t));
+    }
+
+    /// <summary>动态自注册：模块用稳定 channelKey 注册，管理器分配空闲前导字节 + 记录优先级（缺省 → 模块 NetPriority）。
+    /// 幂等：同一 key 已注册 → 返回已分配字节。⚠️ 本入口仅登记通道表（路由/优先级）；Tick/会话生命周期由
+    /// CoopSyncRegistry.RegisterDynamicChannel 或函数式 <see cref="RegisterChannel(string, ChannelCallbacks, NetModulePriority)"/> 挂接。</summary>
+    public int RegisterChannel(string channelKey, ISyncedModule module, NetModulePriority? priority = null)
+    {
+        EnsureReservedTypes();
+        if (string.IsNullOrEmpty(channelKey) || module == null) return 0;
+        if (_channels.TryGetValue(channelKey, out var existing)) return existing.Type; // 幂等
+        int t = AllocateType();
+        if (t == 0)
+        {
+            try { CoopLog.Warn("Net.channelNoType", () => $"[RegMgr] no free leading byte for channel '{channelKey}'"); } catch { }
+            return 0;
+        }
+        var entry = new ChannelEntry { Key = channelKey, Type = t, Module = module, Priority = priority ?? module.NetPriority };
+        _channels[channelKey] = entry;
+        _channelsByType[t] = entry;
+        _usedTypes.Add(t);
+        // ⚠️ 2026-09-12：动态通道按优先级登记关键类型（动态分配的类型不在硬编码表内，
+        // 不登记则合包满时会被丢弃且不重发 → 丢包）。见 RegisterCriticalType。
+        if (entry.Priority == NetModulePriority.Critical || entry.Priority == NetModulePriority.High)
+            RegisterCriticalType(t);
+        try { CoopLog.Info("Net.channelDyn", () => $"[RegMgr] channel '{channelKey}' → type {t} ({module.GetType().Name}, pri={entry.Priority}, critical={IsCriticalType(t)}, width={NetProtocol.HeaderWidth})", 2f); } catch { }
+        return t;
+    }
+
+    // ---- 函数式注册 API（用函数/回调注册同步通道，无需实现 ISyncedModule） ----
+
+    /// <summary>函数式注册：用回调容器注册同步通道（管理器分配前导字节 + 默认 Normal 优先级）。
+    /// 自动挂接 Tick/会话生命周期/中途加入（经 CoopSyncRegistry.AttachModule）。</summary>
+    public int RegisterChannel(string channelKey, ChannelCallbacks callbacks, NetModulePriority priority = NetModulePriority.Normal)
+    {
+        if (string.IsNullOrEmpty(channelKey) || callbacks == null) return 0;
+        var adapter = new FuncChannel(this, channelKey, callbacks);
+        int t = RegisterChannel(channelKey, (ISyncedModule)adapter, priority);
+        if (t == 0) return 0;
+        CoopSyncRegistry.AttachModule(adapter, t);
+        return t;
+    }
+
+    /// <summary>函数式注册便捷重载：直接传回调函数（onPacket 必需，其余可缺省）。</summary>
+    public int RegisterChannel(string channelKey, Action<ulong, byte[]> onPacket, Action<float> tick = null, NetModulePriority priority = NetModulePriority.Normal)
+        => RegisterChannel(channelKey, new ChannelCallbacks { OnPacket = onPacket, Tick = tick }, priority);
+
+    /// <summary>函数式注册适配器：把回调包成 ISyncedModule 接入统一路由/Tick/生命周期。</summary>
+    private sealed class FuncChannel : ISyncedModule
+    {
+        private readonly NetManager _net;
+        private readonly string _key;
+        private readonly ChannelCallbacks _cb;
+
+        public FuncChannel(NetManager net, string key, ChannelCallbacks cb)
+        {
+            _net = net; _key = key; _cb = cb;
+        }
+
+        public int MsgType => _net?.ChannelType(_key) ?? 0; // 由注册管理器分配的前导字节
+
+        public void Tick(float dt) { try { _cb.Tick?.Invoke(dt); } catch { } }
+        public void OnPacket(ulong from, byte[] data) { try { _cb.OnPacket?.Invoke(from, data); } catch { } }
+        public void OnSessionStarted() { try { _cb.OnSessionStarted?.Invoke(); } catch { } }
+        public void OnSessionEnded() { try { _cb.OnSessionEnded?.Invoke(); } catch { } }
+        public void Reset() { try { _cb.Reset?.Invoke(); } catch { } }
+        public void OnLateJoin(ulong steamId) { try { _cb.OnLateJoin?.Invoke(steamId); } catch { } }
+    }
+
+    // ---- 查询 ----
+
+    /// <summary>查询某通道分配的前导字节（动态注册模块发送消息时用；未注册返回 0）。int 支持 2 字节扩展 ≥256。</summary>
+    public int ChannelType(string channelKey)
+        => channelKey != null && _channels.TryGetValue(channelKey, out var e) ? e.Type : 0;
+
+    /// <summary>查询某前导字节注册的优先级（未注册返回 null，调用方回退模块 NetPriority）。</summary>
+    public NetModulePriority? ChannelPriority(int type)
+        => _channelsByType.TryGetValue(type, out var e) ? e.Priority : (NetModulePriority?)null;
+
+    /// <summary>前导字节 → 通道键（诊断/日志用）。</summary>
+    public string ChannelKeyOf(int type)
+        => _channelsByType.TryGetValue(type, out var e) ? e.Key : "";
+
+    /// <summary>分配空闲前导字节：① 1 字节优先段 → ② 全 1 字节空间（真正用尽）→ ③ 1 字节用尽自动扩展：
+    /// 前导字节升为 2 字节（HeaderWidth=2，经 Hello/Welcome 握手沟通），从 2 字节池（0x0300+，
+    /// 避开 bootstrap 高字节 1/2）分配。返回 0 = 全用尽（理论上 2 字节 64K 空间不会耗尽）。</summary>
+    private int AllocateType()
+    {
+        // ① 1 字节优先段
+        foreach (var range in ChannelRanges)
+        {
+            for (byte b = range[0]; ; b++)
+            {
+                if (!_usedTypes.Contains(b) && !_channelsByType.ContainsKey(b)) return b;
+                if (b == range[1]) break;
+            }
+        }
+        // ② 全 1 字节空间扫描（包含优先段之外的剩余空闲，如 7-9 / 123-129 / 147-159 / 255 等）
+        for (int b = 1; b <= 255; b++)
+            if (!_usedTypes.Contains(b) && !_channelsByType.ContainsKey(b)) return b;
+        // ③ 1 字节用尽 → 自动扩展为 2 字节前导字节（本端宽度，握手时与对端沟通确认）
+        if (NetProtocol.HeaderWidth < 2)
+        {
+            NetProtocol.HeaderWidth = 2;
+            try { CoopLog.Info("Net.headerWidth2", () => $"[RegMgr] 1-byte leading type exhausted → auto-extend to 2-byte header (HeaderWidth=2)", 2f); } catch { }
+        }
+        // 2 字节池：0x0300..0xFFFE（避开 bootstrap 高字节 1/2 的 0x0100-0x02FF 段）
+        for (int t = 0x0300; t <= 0xFFFE; t++)
+            if (!_usedTypes.Contains(t) && !_channelsByType.ContainsKey(t)) return t;
+        return 0;
+    }
+
+    // ---- 统一路由 ----
+
+    /// <summary>按前导字节分发给已注册模块（OnPacket 优先调用；int 兼容 2 字节扩展类型）。命中返回 true。</summary>
+    public bool TryRoute(int type, ulong from, byte[] data)
+    {
+        if (_channelsByType.TryGetValue(type, out var e))
+        {
+            try { e.Module.OnPacket(from, data); }
+            catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[RegMgr] Route type={type}: {ex.Message}"); }
+            return true;
+        }
+        return false;
+    }
+
+    // ---- 注册表同步通道（前导字节 1=Hello 上行 / 2=Welcome 下发） ----
+
+    /// <summary>把本端注册表写入 writer（附加在 Hello/Welcome 包尾部）。
+    /// 格式：[byte 条目数] 每项 [string key][byte type]。key 前缀 D:=动态通道，S:=静态采用。</summary>
+    public void WriteChannelTable(NetDataWriter w)
+    {
+        EnsureReservedTypes();
+        var items = new List<(string key, int type)>(_staticChannels.Count + _channels.Count);
+        items.AddRange(_staticChannels);
+        foreach (var kv in _channels) items.Add(("D:" + kv.Key, kv.Value.Type));
+        if (items.Count > 255) items.RemoveRange(255, items.Count - 255);
+        w.Put((byte)items.Count);
+        // 类型按 ushort（2 字节）写——兼容 2 字节扩展类型（握手包只有低频一次，开销可忽略）
+        foreach (var (key, type) in items) { w.Put(key); w.Put((ushort)type); }
+    }
+
+    /// <summary>主机：读取并校验客户端 Hello 里的注册表。客户端注册了主机没有的通道 → 返回 false（拒绝加入）。</summary>
+    public bool VerifyHostChannelTable(NetDataReader r)
+    {
+        EnsureReservedTypes();
+        try
+        {
+            int n = r.GetByte();
+            if (n > 255) return false;
+            int dyn = 0, st = 0;
+            for (int i = 0; i < n; i++)
+            {
+                string key = r.GetString();
+                int t = r.GetUShort();
+                if (string.IsNullOrEmpty(key)) return false;
+                if (key.StartsWith("D:"))
+                {
+                    string k = key.Substring(2);
+                    if (!_channels.TryGetValue(k, out var e))
+                    {
+                        try { CoopLog.Warn("Net.channelUnknown", () => $"[RegMgr] client channel '{k}' unknown to host — reject"); } catch { }
+                        return false; // 客户端比主机新/不同 build → 无法同步
+                    }
+                    if (e.Type != t) // 同 build 不应发生；发生则以主机为准（后续 Welcome 下发）
+                        try { CoopLog.Warn("Net.channelTypeDiff", () => $"[RegMgr] channel '{k}' type client={t} host={e.Type} (host authoritative)"); } catch { }
+                    dyn++;
+                }
+                else if (key.StartsWith("S:"))
+                {
+                    bool known = false;
+                    foreach (var s in _staticChannels) if (s.key == key) { known = true; break; }
+                    if (!known)
+                    {
+                        try { CoopLog.Warn("Net.channelUnknown", () => $"[RegMgr] client static '{key}' unknown to host — reject"); } catch { }
+                        return false;
+                    }
+                    st++;
+                }
+                // 未知前缀：忽略（向前兼容）
+            }
+            try { CoopLog.Info("Net.channelVerify", () => $"[RegMgr] client registration ok dyn={dyn} static={st}", 2f); } catch { }
+            return true;
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[RegMgr] VerifyHostChannelTable: {ex.Message}"); return false; }
+    }
+
+    /// <summary>客户端：应用主机 Welcome 里的权威注册表。动态通道字节以主机为准（重映射）；静态/未知仅记录。</summary>
+    public void ApplyHostChannelTable(NetDataReader r)
+    {
+        EnsureReservedTypes();
+        try
+        {
+            int n = r.GetByte();
+            if (n > 255) return;
+            int matched = 0, remapped = 0;
+            for (int i = 0; i < n; i++)
+            {
+                string key = r.GetString();
+                int t = r.GetUShort();
+                if (string.IsNullOrEmpty(key)) continue;
+                if (key.StartsWith("D:"))
+                {
+                    string k = key.Substring(2);
+                    if (_channels.TryGetValue(k, out var e))
+                    {
+                        if (e.Type != t)
+                        {
+                            _channelsByType.Remove(e.Type);
+                            int old = e.Type;
+                            e.Type = t;
+                            _channelsByType[t] = e;
+                            _usedTypes.Add(t);
+                            remapped++;
+                            try { CoopLog.Info("Net.channelRemap", () => $"[RegMgr] channel '{k}' {old}→{t} (host authoritative)", 2f); } catch { }
+                        }
+                        matched++;
+                    }
+                    else
+                    {
+                        try { CoopLog.Info("Net.channelHostExtra", () => $"[RegMgr] host channel '{k}' absent locally (ignored)", 2f); } catch { }
+                    }
+                }
+                else if (key.StartsWith("S:"))
+                {
+                    // 静态（硬编码）类型：同 build 必然一致，仅计数
+                    foreach (var s in _staticChannels) if (s.key == key) { matched++; break; }
+                }
+            }
+            try { CoopLog.Info("Net.channelApply", () => $"[RegMgr] applied host table matched={matched}/{n} remapped={remapped}", 2f); } catch { }
+        }
+        catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"[RegMgr] ApplyHostChannelTable: {ex.Message}"); }
+    }
+
+    /// <summary>会话开始日志：列出全部已管理通道（诊断）。</summary>
+    public void LogChannelTable(string who)
+    {
+        EnsureReservedTypes();
+        try
+        {
+            var sb = new System.Text.StringBuilder($"[RegMgr] {who} registration table: ");
+            foreach (var kv in _channels) sb.Append($"{kv.Key}→{kv.Value.Type}({kv.Value.Priority}) ");
+            foreach (var s in _staticChannels) sb.Append($"{s.key}→{s.type} ");
+            CoopLog.Info("Net.channelTable", () => sb.ToString(), 5f);
+        }
+        catch { }
+    }
+
     /// <summary>
     /// 游戏（Heathen）可能只原生初始化了 Steam，而没有初始化 Steamworks.NET 的托管静态上下文
     /// （CSteamAPIContext / CallbackDispatcher），导致 SteamMatchmaking / SteamNetworking 等
@@ -275,8 +592,11 @@ public class NetManager
                     w.Put(Environment.TickCount64);
                     Transport.Send(p.SteamId, NetProtocol.Snapshot(w), false);
                     p.LastPingSentTicks = Environment.TickCount64;
+                    // ⚠️ 2026-09-05 丢包率误判修复：RecordPingSent 每发一个 Ping 记一次（原来 if 块外又记
+                    // 一次 → 主机 _pingSent 翻倍 → loss=(2N-N)/2N=50% > 25% 硬信号 → NetworkGovernor 误降
+                    // Critical → 所有 Low 模块降频 → 列车窜/打字机不同步/开炮不同步）。
+                    NetworkGovernor.Instance.RecordPingSent();
                 }
-                NetworkGovernor.Instance.RecordPingSent();
             }
             else if (State == SessionState.Joined && HostSteamId != 0)
             {
@@ -284,8 +604,8 @@ public class NetManager
                 w.Put(Environment.TickCount64);
                 Transport.Send(HostSteamId, NetProtocol.Snapshot(w), false);
                 Local.LastPingSentTicks = Environment.TickCount64;
+                NetworkGovernor.Instance.RecordPingSent();
             }
-            NetworkGovernor.Instance.RecordPingSent();
         }
 
         // ---- 同步方案分支（--sync old|new）----
@@ -345,10 +665,43 @@ public class NetManager
         }
     }
 
-    /// <summary>关键消息类型（事件/交互/关键状态——边沿触发或影响一致性，丢失即不同步）。
-    /// 合包上限丢弃时保护这些类型（不丢）；只丢可重发的周期状态。</summary>
-    private static bool IsCriticalType(byte t)
+    /// <summary>额外登记的关键消息类型集合（<see cref="RegisterCriticalType"/> 显式登记 +
+    /// Critical/High 优先级模块自动登记）。用 int 以覆盖 2 字节扩展类型（≥256）。
+    /// ⚠️ 2026-09-12：旧实现只有硬编码 byte 表（且调用点写死 `t &lt; 256`）→ 动态通道
+    /// （`shotparams`/`blocker`/铁巢图标 146 等）**不在保护范围**，合包满时被丢弃且不重发
+    /// = “模组丢包”根因之一。改为「硬编码表 ∪ 登记集合」后动态通道同样受保护。</summary>
+    private static readonly System.Collections.Generic.HashSet<int> _criticalTypes = new();
+
+    /// <summary>登记关键消息类型（幂等；可多次调用）。合包上限丢弃时该类型**永不丢**（reliable 时）。
+    /// 用于“边沿触发 / 丢了就永久不同步”的消息（事件、交互、参数下发）。
+    /// 何时需要显式登记：
+    ///   ① 模块优先级不是 Critical/High，但其中某几个类型视为关键（如混合模块的附加类型）；
+    ///   ② 函数式注册（<see cref="RegisterChannel(string, ISyncedModule, NetModulePriority?)"/>）之外
+    ///      自管发送的通道；
+    ///   ③ 第三方扩展模组用自己的通道发关键消息时主动登记（见 `docs/API.md` 第 3 节）。
+    /// 硬编码表内的框架类型（GunFire/Impact/ReloadState/…）已默认保护，**无需重复登记**。</summary>
+    public static void RegisterCriticalType(int t)
     {
+        if (t <= 0) return;
+        try { _criticalTypes.Add(t); } catch { }
+    }
+
+    /// <summary>批量登记关键消息类型（见 <see cref="RegisterCriticalType(int)"/>）。</summary>
+    public static void RegisterCriticalTypes(params int[] types)
+    {
+        if (types == null) return;
+        foreach (var t in types) RegisterCriticalType(t);
+    }
+
+    /// <summary>查询某类型是否被保护（硬编码表 ∪ 登记集合）——供模块自检/诊断打印。</summary>
+    public static bool IsCriticalRegistered(int t) => IsCriticalType(t);
+
+    /// <summary>关键消息类型（事件/交互/关键状态——边沿触发或影响一致性，丢失即不同步）。
+    /// 合包上限丢弃时保护这些类型（不丢）；只丢可重发的周期状态。
+    /// 判定 = 硬编码表（下 switch）∪ <see cref="_criticalTypes"/>（显式登记 / Critical·High 优先级模块）。</summary>
+    private static bool IsCriticalType(int t)
+    {
+        if (_criticalTypes.Contains(t)) return true;
         switch (t)
         {
             case (byte)MsgType.TurretState:       // 炮塔状态
@@ -397,10 +750,11 @@ public class NetManager
     {
         try
         {
-            int t = data[0] & 0xFF;
-            if (t < 256) _sendStats[t]++;
-            // per-module 带宽占用：按 MsgType 归因入队字节（NetworkGovernor 诊断统计）
-            NetworkGovernor.Instance.RecordTypeBytes((byte)t, data.Length);
+            // 前导字节类型按宽度解析（1 字节 / 2 字节大端 ushort）——兼容 2 字节扩展
+            int t = NetProtocol.TypeLen >= 2 ? ((data[0] << 8) | (data.Length > 1 ? (data[1] & 0xFF) : 0)) : (data[0] & 0xFF);
+            if (t >= 0 && t < 256) _sendStats[t]++;
+            // per-module 带宽占用：按 MsgType 归因入队字节（NetworkGovernor 诊断统计；仅统计 1 字节段）
+            if (t < 256) NetworkGovernor.Instance.RecordTypeBytes((byte)t, data.Length);
             // ⚠️ 合包上限由 NetworkGovernor 分级动态控制：负载高（低档）→ 上限缩小 → 超限丢弃。
             // 丢弃 = 负载过高信号（RecordDrop 喂回评估器 → 触发降频）；发送端 reliable 保底/心跳负责最终对齐。
             // 注意：只有 reliable 丢弃算拥塞信号——unreliable 本身容忍丢失（Critical 档还会主动关闭），
@@ -408,8 +762,8 @@ public class NetManager
             int maxItems = NetworkGovernor.Instance.MaxBatchItems;
             // ⚠️ 关键类型（事件/交互/装填/开火/落点等边沿触发，丢了永久不同步）**不参与合包上限丢弃**——
             // 合包满时关键包仍入队（FlushBatch 拆包发出）；只丢可重发的周期状态。避免网络分级"吞关键包"导致
-            // 客机炮弹落点/装填/交互不同步。
-            bool critical = reliable && IsCriticalType((byte)t);
+            // 客机炮弹落点/装填/交互不同步。2 字节扩展类型按非关键处理（周期状态，可重发）。
+            bool critical = reliable && IsCriticalType(t);
             bool dropped = false;
             if (reliable)
             {
@@ -434,19 +788,21 @@ public class NetManager
     {
         try
         {
-            int origType = data[0] & 0xFF;
-            int payloadLen = data.Length - 1; // 去掉首字节类型
-            int maxSeg = FragmentThreshold - 6; // 预留 Fragment 头（type+fragId 2B+total+index ≈ 6B）
+            int typeLen = NetProtocol.TypeLen; // 前导字节宽度（1/2）
+            int origType = typeLen >= 2 ? ((data[0] << 8) | (data[1] & 0xFF)) : (data[0] & 0xFF);
+            int payloadLen = data.Length - typeLen; // 去掉前导字节
+            int maxSeg = FragmentThreshold - 8; // 预留 Fragment 头（type + origType 2B + fragId 2B + total + index ≈ 8B）
             if (maxSeg < 64) maxSeg = 64;
             int total = (payloadLen + maxSeg - 1) / maxSeg;
             if (total > 255) total = 255; // 防溢出
             ushort fid = ++_fragId;
             for (int i = 0; i < total; i++)
             {
-                int off = i * maxSeg + 1; // +1 跳过类型字节
+                int off = i * maxSeg + typeLen; // 跳过前导字节
                 int len = Math.Min(maxSeg, data.Length - off);
                 var w = NetProtocol.Begin(MsgType.Fragment);
-                w.Put((byte)origType);
+                // 内部格式：origType 恒按 ushort 写（兼容 2 字节扩展类型；两端同 build）
+                w.Put((ushort)origType);
                 w.Put(fid);
                 w.Put((byte)total);
                 w.Put((byte)i);
@@ -457,15 +813,15 @@ public class NetManager
         catch { }
     }
 
-    /// <summary>重组分片：收齐后拼回原始 data（首字节 origType + 各段 payload），递归 OnPacket 处理。</summary>
+    /// <summary>重组分片：收齐后拼回原始 data（前导字节 origType + 各段 payload），递归 OnPacket 处理。</summary>
     private bool ReassembleFragment(ulong from, byte[] data, out byte[] full)
     {
         full = null;
         try
         {
             var r = new NetDataReader(data);
-            r.GetByte(); // 跳过 Fragment 类型
-            int origType = r.GetByte();
+            r.SkipBytes(NetProtocol.TypeLen); // 跳过 Fragment 类型（宽度感知）
+            int origType = r.GetUShort();     // 内部格式恒 ushort
             ushort fid = r.GetUShort();
             int total = r.GetByte();
             int index = r.GetByte();
@@ -485,12 +841,14 @@ public class NetManager
             // ⚠️ FragBuf 是引用类型：fb 即字典里的实例，修改直接生效（值类型元组副本曾导致 got 永不写回 → 永不重组）
             if (fb.Segs[index] == null) { fb.Segs[index] = seg; fb.Got++; }
             if (fb.Got < fb.Total) return false;
-            // 收齐：拼接
-            int len = 1;
+            // 收齐：拼接（前导字节按宽度还原，保证递归 OnPacket 的 TypeOf 正确）
+            int typeLen = NetProtocol.TypeLen;
+            int len = typeLen;
             for (int i = 0; i < fb.Total; i++) len += fb.Segs[i]?.Length ?? 0;
             full = new byte[len];
-            full[0] = (byte)origType;
-            int pos = 1;
+            if (typeLen >= 2) { full[0] = (byte)(origType >> 8); full[1] = (byte)(origType & 0xFF); }
+            else full[0] = (byte)origType;
+            int pos = typeLen;
             for (int i = 0; i < fb.Total; i++) { var s = fb.Segs[i]; if (s == null) return false; System.Array.Copy(s, 0, full, pos, s.Length); pos += s.Length; }
             _fragBuf.Remove(key);
             return true;
@@ -950,15 +1308,20 @@ public class NetManager
                 Core.LobbySettings.Save(PendingLobbyName, PendingMaxPlayers, PendingPassword);
             }
             State = SessionState.Joined;
-            // 向主机自我介绍（同步方案 + 握手版本 + 模组版本 + 房间密码 + 昵称；任一不符会被主机拒绝）
+            // 向主机自我介绍（同步方案 + 前导字节宽度 + 握手版本 + 模组版本 + 房间密码 + 昵称；任一不符会被主机拒绝）
             var w = NetProtocol.Begin(MsgType.Hello);
             w.Put((byte)(OpenNestCoop.Net.AutoJoin.WantNewSync ? 1 : 0)); // syncScheme: 0=old 1=new
-            w.Put(NetConfig.HandshakeVersion); // 握手协议版本（2 = 含版本/密码字段）
+            w.Put((byte)NetProtocol.HeaderWidth); // 前导字节宽度沟通（1/2）：Hello/Welcome 恒 1 字节，宽度在载荷内沟通
+            w.Put(NetConfig.HandshakeVersion); // 握手协议版本（4 = 含前导字节宽度 + 注册通道表）
             w.Put(NetConfig.Version);          // 模组版本号
             w.Put(PendingPassword ?? "");      // 房间密码（明文，主机按 hash 校验）
             w.Put(Local.Name);
+            // 注册通道（前导字节 1）：客户端把本端注册表附加在 Hello 上行，主机校验后下发权威表
+            WriteChannelTable(w);
             Transport.Send(_joinedHostId, NetProtocol.Snapshot(w), true);
         }
+        // 注册通道诊断：会话开始列出本端注册表（模块 → 前导字节 + 优先级）
+        LogChannelTable(State == SessionState.Hosting ? "host" : "client");
         StateChanged?.Invoke();
         RosterChanged?.Invoke();
     }
@@ -1053,11 +1416,11 @@ public class NetManager
     private void OnPacket(ulong from, byte[] data)
     {
         var r = new NetDataReader(data);
-        var type = NetProtocol.TypeOf(r);
-        if ((int)type < 256) _recvStats[(int)type]++;
+        int type = NetProtocol.TypeOf(r); // int：兼容 2 字节扩展类型（≥256）
+        if (type >= 0 && type < 256) _recvStats[type]++;
 
         // 合包容器：拆包后递归处理各子包
-        if (type == MsgType.Batch)
+        if (type == (int)MsgType.Batch)
         {
             try
             {
@@ -1096,7 +1459,7 @@ public class NetManager
 
         // ⚠️ 2026-08-26：大包分片重组（Steam P2P 单包硬性限制）——Fragment 子包先缓冲，收齐后重组为原始
         // 数据再递归 OnPacket（对模块透明）。Batch 容器内拆出的 Fragment 子包也会走到这里。
-        if (type == MsgType.Fragment)
+        if (type == (int)MsgType.Fragment)
         {
             if (ReassembleFragment(from, data, out var full) && full != null)
                 OnPacket(from, full); // 递归处理重组后的原始包
@@ -1104,12 +1467,17 @@ public class NetManager
         }
 
         if ((++_pktRecvLog % 100) == 1)
-            CoopLog.Debug("Net.recvPkt", () => $"[Net] recv pkt type={(byte)type} len={data.Length} from={from}");
+            CoopLog.Debug("Net.recvPkt", () => $"[Net] recv pkt type={type} len={data.Length} from={from}");
 
-        // 自定义同步模块路由（优先，命中则交给模块处理）
-        if (CoopSyncRegistry.TryRoute((byte)type, from, data)) return;
+        // 注册管理器统一路由（优先：含动态分配 + 静态采用的全部模块，按前导字节分发）
+        if (TryRoute(type, from, data)) return;
+        // 自定义同步模块路由（兼容兜底：仅登记在注册表、未经注册管理器的旧路径）
+        if (CoopSyncRegistry.TryRoute(type, from, data)) return;
 
-        switch (type)
+        // 2 字节扩展类型：未注册的路由不到 → 忽略（不落入 1 字节 switch 造成错配）
+        if (type > 255) return;
+
+        switch ((MsgType)type)
         {
             case MsgType.Hello:
                 if (State != SessionState.Hosting) break;
@@ -1244,6 +1612,15 @@ public class NetManager
             return;
         }
 
+        // 前导字节宽度沟通（注册通道）：客户端声明的宽度（1/2）必须与本端一致
+        int remoteWidth = -1;
+        try { remoteWidth = r.GetByte(); } catch { }
+        if (remoteWidth != NetProtocol.HeaderWidth)
+        {
+            RejectJoin(from, $"Header width mismatch: room={NetProtocol.HeaderWidth} you={remoteWidth}");
+            return;
+        }
+
         // 握手协议版本：旧客户端（Hello 无此字段）→ 拒绝，提示更新
         int handshakeVer = -1;
         try { handshakeVer = r.GetByte(); } catch { }
@@ -1273,6 +1650,10 @@ public class NetManager
         }
 
         var name = r.GetString();
+
+        // 注册通道（前导字节 1）：读取并校验客户端注册表——客户端带主机不认识的通道 → 拒绝（build 不兼容）
+        try { if (!VerifyHostChannelTable(r)) { RejectJoin(from, "Registration mismatch"); return; } } catch { }
+
         PlayerSession session = null;
         foreach (var s in Roster) if (s.SteamId == from) { session = s; break; }
         if (session == null)
@@ -1287,13 +1668,16 @@ public class NetManager
             session.Name = name;
         }
 
-        // 发 Welcome（分配序号 + 全量名单 + 同步方案 + 握手版本 + 主机版本）
+        // 发 Welcome（分配序号 + 全量名单 + 同步方案 + 前导字节宽度 + 握手版本 + 主机版本 + 权威注册表）
         var w = NetProtocol.Begin(MsgType.Welcome);
         w.Put((byte)(OpenNestCoop.Net.AutoJoin.WantNewSync ? 1 : 0)); // syncScheme
+        w.Put((byte)NetProtocol.HeaderWidth); // 前导字节宽度沟通（主机权威，与本端一致）
         w.Put(NetConfig.HandshakeVersion);
         w.Put(NetConfig.Version);
         w.Put(session.PlayerId);
         NetProtocol.WriteRoster(w, Roster);
+        // 注册通道（前导字节 2）：主机权威注册表随 Welcome 下发，客户端采纳
+        WriteChannelTable(w);
         Transport.Send(from, NetProtocol.Snapshot(w), true);
 
         // 广播新名单
@@ -1342,6 +1726,16 @@ public class NetManager
             Lobby.LeaveLobby();
             return;
         }
+        // 前导字节宽度沟通（注册通道）：主机声明的宽度必须与本端一致
+        int remoteWidth = -1;
+        try { remoteWidth = r.GetByte(); } catch { }
+        if (remoteWidth != NetProtocol.HeaderWidth)
+        {
+            LastError = $"Header width mismatch: host={remoteWidth} you={NetProtocol.HeaderWidth}";
+            CoopRuntime.LogSource?.LogWarning($"[Net] header width mismatch host={remoteWidth} local={NetProtocol.HeaderWidth}, leave");
+            Lobby.LeaveLobby();
+            return;
+        }
         // 握手协议版本 + 主机模组版本核对：不符离开
         int handshakeVer = -1;
         try { handshakeVer = r.GetByte(); } catch { }
@@ -1367,6 +1761,8 @@ public class NetManager
         Roster.Clear();
         Roster.AddRange(roster);
         MarkLocal();
+        // 注册通道（前导字节 2）：采纳主机权威注册表（动态通道前导字节以主机为准）
+        try { ApplyHostChannelTable(r); } catch { }
         State = SessionState.Joined;
         RosterChanged?.Invoke();
         StateChanged?.Invoke();
@@ -1442,4 +1838,22 @@ public class NetManager
         foreach (var p in Roster)
             if (!p.IsLocal) Transport.Send(p.SteamId, data, true);
     }
+}
+
+/// <summary>函数式通道注册回调容器（<see cref="NetManager.RegisterChannel(string, ChannelCallbacks, NetModulePriority)"/> 用）：
+/// 用函数/回调注册同步通道，无需实现 ISyncedModule。任一回调可缺省（null 则该项不驱动）。</summary>
+public sealed class ChannelCallbacks
+{
+    /// <summary>收包处理（必填）：(from, data)。</summary>
+    public Action<ulong, byte[]> OnPacket;
+    /// <summary>每帧/周期驱动（可选）：缩放后的 dt。</summary>
+    public Action<float> Tick;
+    /// <summary>会话开始（可选）：进入房间（主机或已加入）。</summary>
+    public Action OnSessionStarted;
+    /// <summary>会话结束（可选）：离开/被踢。</summary>
+    public Action OnSessionEnded;
+    /// <summary>中途加入（可选）：主机把本通道当前状态单播给新成员 steamId。</summary>
+    public Action<ulong> OnLateJoin;
+    /// <summary>重置（可选）。</summary>
+    public Action Reset;
 }

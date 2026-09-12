@@ -43,6 +43,7 @@ public static class OncMissionIO
         o["EntryPointId"] = m.EntryPointId;
         o["Requires"] = ToStrList(m.Requires);
         o["UnlockCondition"] = m.UnlockCondition;
+        o["NativeComplete"] = m.NativeComplete;
         if (m.Card != null) o["Card"] = SaveCard(m.Card);
         o["Objectives"] = SaveObjectives(m.Objectives);
         o["Nodes"] = SaveNodes(m.Nodes);
@@ -96,6 +97,18 @@ public static class OncMissionIO
                 obs.Add(oo);
             }
         o["Objectives"] = obs;
+        var vars = new List<object>();
+        if (s.Variables != null)
+            for (int i = 0; i < s.Variables.Count; i++)
+            {
+                var vs = s.Variables[i];
+                if (vs == null) continue;
+                var vo = new Dictionary<string, object>();
+                vo["Name"] = vs.Name;
+                vo["Value"] = vs.Value;
+                vars.Add(vo);
+            }
+        o["Variables"] = vars;
         return OncJson.Serialize(o);
     }
 
@@ -116,6 +129,7 @@ public static class OncMissionIO
         m.Seed = OncJson.GetInt(o, "Seed", -1);
         m.EntryPointId = OncJson.GetString(o, "EntryPointId");
         m.UnlockCondition = OncJson.GetString(o, "UnlockCondition");
+        m.NativeComplete = OncJson.GetBool(o, "NativeComplete");
         m.Card = LoadCard(OncJson.GetObject(o, "Card"));
         m.Requires = ToList(OncJson.GetArray(o, "Requires"));
         m.Objectives = LoadObjectives(OncJson.GetArray(o, "Objectives"));
@@ -198,6 +212,19 @@ public static class OncMissionIO
                     Progress = OncJson.GetInt(oo, "Progress"),
                 });
             }
+        s.Variables = new List<OncScriptVarState>();
+        var varr = OncJson.GetArray(o, "Variables");
+        if (varr != null)
+            for (int i = 0; i < varr.Count; i++)
+            {
+                var vo = varr[i] as Dictionary<string, object>;
+                if (vo == null) continue;
+                s.Variables.Add(new OncScriptVarState
+                {
+                    Name = OncJson.GetString(vo, "Name"),
+                    Value = OncJson.GetString(vo, "Value"),
+                });
+            }
         return s;
     }
 
@@ -252,6 +279,8 @@ public static class OncMissionIO
             o["TimerId"] = n.TimerId;
             o["NotifId"] = n.NotifId;
             o["CustomData"] = n.CustomData;
+            o["ModuleName"] = n.ModuleName;
+            o["ModuleArgs"] = n.ModuleArgs;
             list.Add(o);
         }
         return list;
@@ -293,6 +322,8 @@ public static class OncMissionIO
             n.TimerId = OncJson.GetString(o, "TimerId");
             n.NotifId = OncJson.GetString(o, "NotifId");
             n.CustomData = OncJson.GetString(o, "CustomData");
+            n.ModuleName = OncJson.GetString(o, "ModuleName");
+            n.ModuleArgs = OncJson.GetString(o, "ModuleArgs");
             var routes = OncJson.GetArray(o, "Routes");
             if (routes != null)
                 for (int r = 0; r < routes.Count; r++)

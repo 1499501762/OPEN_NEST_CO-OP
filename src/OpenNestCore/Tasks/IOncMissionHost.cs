@@ -70,6 +70,23 @@ public interface IOncMissionHost
     /// <summary>异步加载任务地图图（IronRoadMap 地图/地形图，走游戏 MissionMapLoader.Acquire）。
     /// <paramref name="onLoaded"/> 参数为 UnityEngine.Sprite（加载失败为 null）。</summary>
     void LoadMapSprite(OncMission mission, bool topography, Action<object> onLoaded);
+
+    // ---- 脚本化模块 ----
+    /// <summary>执行脚本化模块（<see cref="OncNodeKind.Scripted"/> 节点）。
+    /// 宿主按 <paramref name="ctx"/>.ModuleName 分派到注册的脚本模块（C# 回调）或解释 Args（JSON）。</summary>
+    void RunScriptedModule(OncScriptContext ctx);
+
+    /// <summary>脚本化条件求值（<see cref="OncNodeKind.ScriptedCondition"/>）：分派模块，读 <paramref name="ctx"/>.BoolResult。</summary>
+    bool RunScriptedCondition(OncScriptContext ctx);
+
+    /// <summary>脚本化挂起轮询（<see cref="OncNodeKind.ScriptedWait"/>）：每帧问模块"好了没"，读 BoolResult。</summary>
+    bool RunScriptedWait(OncScriptContext ctx);
+
+    /// <summary>脚本事件广播（A4 联机）：主机权威把脚本事件广播给全员，客机收到后本地触发。</summary>
+    void BroadcastScriptEvent(string eventId, object payload);
+
+    /// <summary>计时器到期回调（A2：Core runtime 计时器归零 → 宿主转发 "timer.expired.&lt;id&gt;" 事件）。</summary>
+    void OnTimerExpired(string timerId);
 }
 
 /// <summary>
@@ -105,4 +122,10 @@ public abstract class OncMissionHostAdapter : IOncMissionHost
     public virtual void UnlockSceneObject(string objectId) { }
 
     public virtual void LoadMapSprite(OncMission mission, bool topography, Action<object> onLoaded) { }
+
+    public virtual void RunScriptedModule(OncScriptContext ctx) { }
+    public virtual bool RunScriptedCondition(OncScriptContext ctx) => true;
+    public virtual bool RunScriptedWait(OncScriptContext ctx) => true;
+    public virtual void BroadcastScriptEvent(string eventId, object payload) { }
+    public virtual void OnTimerExpired(string timerId) { }
 }

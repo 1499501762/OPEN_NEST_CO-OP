@@ -75,6 +75,18 @@ public static class OncMissionBridge
     private static bool _nativeRefPending; // 原生任务进场景后延迟捕获引擎参考
     private static float _nativeRefTimer;
     private static int _nativeRefCount;    // 已捕获次数（多次采样看状态变化）
+    // ⚠️ 任务完成后延迟原生结算（2026-08-30）：Core 任务完成时场景可能还在加载（SceneManager.LoadScene 异步/
+    // 初始化延迟），MissionManager.Instance 可能为 null → 不能立即结算。改为 pending + Update 里每帧重试，
+    // 等 MissionManager 就绪再 MarkMissionComplete/MarkMissionFailed（原生结算界面/参数传递才完整）。
+    private static OncMissionRuntime _pendingReturnMission; // 待结算任务（完成/失败后设置）
+    private static bool _pendingReturnFailed;              // 是否失败结算
+    private static float _pendingReturnTimer;              // 等待超时计时
+    // ⚠️ 原生结算等待（2026-08-30 docs §D2 定案）：设好原生上下文后驱动原生图推进，再 MarkMissionComplete
+    // /MarkMissionFailed → 原生结算界面（EndOfMissionUIController）弹出 + dismiss 返回。
+    private static bool _nativeReturnPending;
+    private static float _nativeReturnWaitTimer;
+    private static bool _nativeReturnMarkDone;  // 是否已调 MarkMissionComplete/Failed（只触发一次）
+    private static bool _nativeReturnFailed;    // 成功(false) / 失败(true)
 
     /// <summary>当前运行中的任务运行时（未运行时为 null）。</summary>
     public static OncMissionRuntime Current => _current;
@@ -92,6 +104,393 @@ public static class OncMissionBridge
 
     /// <summary>原生格式任务 JSON（MissionImporter 格式）→ 注册占位（卡片显示）+ 存 raw JSON。</summary>
     private static readonly Dictionary<string, string> _nativeRaw = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    // ---------------- 脚本化模块（"在原生的 Node 任务引擎上引入脚本化模块"） ----------------
+    /// <summary>脚本化模块注册项（B3 生命周期：可带 OnMissionStarted/OnMissionEnded 钩子）。</summary>
+    private sealed class ScriptedModuleEntry
+    {
+        public Action<OncScriptContext> Fn;
+        public Action<OncMissionRuntime> OnMissionStarted;
+        public Action<OncMissionRuntime> OnMissionEnded;
+    }
+
+    /// <summary>脚本化模块注册表：模块名 → 注册项。Core Scripted 节点 / 原生脚本锚点节点进入时按名分派。</summary>
+    private static readonly Dictionary<string, ScriptedModuleEntry> _scriptedModules =
+        new Dictionary<string, ScriptedModuleEntry>(StringComparer.Ordinal);
+
+    /// <summary>原生图脚本锚点节点表：nodeId → 模块名（RegisterNativeFromJson 扫描 State_CustomTrackingVariable 载体）。</summary>
+    private static readonly Dictionary<string, string> _nativeScriptedNodes = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>脚本模块事件订阅表（B 方案）：事件 id → 模块名列表。游戏事件（A 桥接）触发时分派。</summary>
+    private static readonly Dictionary<string, List<string>> _scriptedHooks = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+    /// <summary>实体摧毁事件轮询状态（FireMission.Entities 死亡检测）。</summary>
+    private static readonly HashSet<string> _knownEntities = new HashSet<string>(StringComparer.Ordinal);
+    private static float _entityEventTimer;
+
+    /// <summary>上次原生图脚本锚点检测的节点 id（防同一节点重复触发）。</summary>
+    private static string _lastScriptedNativeNode;
+
+    /// <summary>注册脚本化模块（C# 回调）。被 <see cref="OncNodeKind.Scripted"/> 节点 / 原生脚本锚点触发。</summary>
+    public static void RegisterScriptedModule(string name, Action<OncScriptContext> fn)
+        => RegisterScriptedModule(name, fn, null, null);
+
+    /// <summary>注册脚本化模块（B3：可选生命周期钩子 OnMissionStarted/OnMissionEnded，任务启动/结束时调用）。</summary>
+    public static void RegisterScriptedModule(string name, Action<OncScriptContext> fn,
+        Action<OncMissionRuntime> onMissionStarted, Action<OncMissionRuntime> onMissionEnded)
+    {
+        if (string.IsNullOrEmpty(name)) return;
+        if (fn == null) { _scriptedModules.Remove(name); return; }
+        if (!_scriptedModules.TryGetValue(name, out var entry))
+        {
+            entry = new ScriptedModuleEntry();
+            _scriptedModules[name] = entry;
+        }
+        entry.Fn = fn;
+        if (onMissionStarted != null) entry.OnMissionStarted = onMissionStarted;
+        if (onMissionEnded != null) entry.OnMissionEnded = onMissionEnded;
+        CoopLog.Info("onc.mission.script", () => $"OncMission scripted module registered: '{name}'");
+    }
+
+    /// <summary>执行脚本化模块（分派到注册表；未注册 → 日志提示，不中断任务）。</summary>
+    public static void RunScriptedModule(OncScriptContext ctx)
+    {
+        if (ctx == null || string.IsNullOrEmpty(ctx.ModuleName)) return;
+        if (_scriptedModules.TryGetValue(ctx.ModuleName, out var entry) && entry != null && entry.Fn != null)
+        {
+            try { entry.Fn(ctx); CoopLog.Debug("onc.mission.script", () => $"OncMission scripted module ran: '{ctx.ModuleName}'"); }
+            catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission scripted module '{ctx.ModuleName}' error: {ex.Message}"); }
+            return;
+        }
+        CoopLog.Warn("onc.mission.script", () => $"OncMission scripted module not registered: '{ctx.ModuleName}'");
+    }
+
+    /// <summary>任务启动/结束时通知脚本模块生命周期钩子（B3）。</summary>
+    private static void NotifyScriptedLifecycle(bool started, OncMissionRuntime rt)
+    {
+        if (_scriptedModules.Count == 0) return;
+        foreach (var kv in _scriptedModules)
+        {
+            var e = kv.Value;
+            if (e == null) continue;
+            try
+            {
+                if (started) e.OnMissionStarted?.Invoke(rt);
+                else e.OnMissionEnded?.Invoke(rt);
+            }
+            catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission module lifecycle '{kv.Key}' error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>挂接脚本模块生命周期（创建 runtime 后调用）：启动钩子 + 结束事件订阅。</summary>
+    private static void AttachScriptedLifecycle(OncMissionRuntime rt)
+    {
+        if (rt == null) return;
+        try
+        {
+            rt.OnCompleted += rt2 => NotifyScriptedLifecycle(false, rt2);
+            rt.OnFailed += rt2 => NotifyScriptedLifecycle(false, rt2);
+            rt.OnCanceled += rt2 => NotifyScriptedLifecycle(false, rt2);
+            NotifyScriptedLifecycle(true, rt);
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// 注册脚本模块事件订阅（B 方案）：当游戏事件 <paramref name="eventId"/> 触发时，分派脚本模块
+    /// <paramref name="moduleName"/>（可多次、可异步、可持续）。事件来源见 A 方案
+    /// （OncMissionEventHooks：mission.* / shell.landed / interact.click / entity.destroyed.*）。
+    /// 事件 id 取精确匹配；模块须已 <see cref="RegisterScriptedModule"/> 注册。
+    /// </summary>
+    public static void RegisterScriptedHook(string eventId, string moduleName)
+    {
+        if (string.IsNullOrEmpty(eventId) || string.IsNullOrEmpty(moduleName)) return;
+        if (!_scriptedHooks.TryGetValue(eventId, out var list))
+        {
+            list = new List<string>();
+            _scriptedHooks[eventId] = list;
+        }
+        if (!list.Contains(moduleName)) list.Add(moduleName);
+        CoopLog.Info("onc.mission.script", () => $"OncMission scripted hook: '{eventId}' -> module '{moduleName}'");
+    }
+
+    /// <summary>是否有订阅 <paramref name="prefix"/> 前缀的事件（如 "entity.destroyed"）——实体摧毁轮询的节流门。</summary>
+    private static bool HasScriptedEventPrefix(string prefix)
+    {
+        if (string.IsNullOrEmpty(prefix) || _scriptedHooks.Count == 0) return false;
+        foreach (var kv in _scriptedHooks)
+            if (kv.Key.StartsWith(prefix, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// 事件分发（A 桥接入口）：游戏事件（OncMissionEventHooks）→ ①喂 Core 图（WaitForEvent/Branch）
+    /// ②分派脚本模块事件订阅（B）。
+    /// </summary>
+    public static void Raise(string eventId, object payload = null)
+    {
+        // ① Core 图：驱动 WaitForEvent/Branch
+        if (_current != null) { try { _current.Raise(eventId, payload); } catch { } }
+        // ② 脚本模块事件订阅（B）
+        DispatchScriptedHooks(eventId, payload);
+    }
+
+    private static void DispatchScriptedHooks(string eventId, object payload)
+    {
+        if (string.IsNullOrEmpty(eventId) || _scriptedHooks.Count == 0) return;
+        if (!_scriptedHooks.TryGetValue(eventId, out var modules)) return;
+        for (int i = 0; i < modules.Count; i++)
+        {
+            string m = modules[i];
+            if (string.IsNullOrEmpty(m)) continue;
+            RunScriptedModule(new OncScriptContext
+            {
+                ModuleName = m,
+                Event = new OncScriptEvent { EventId = eventId, Payload = payload },
+            });
+        }
+    }
+
+    /// <summary>
+    /// 实体摧毁事件轮询（A 方案事件源之一）：订阅了 "entity.destroyed" 前缀事件时，每 0.5s 查
+    /// FireMission.Entities，检测 alive→dead 转换 → Raise("entity.destroyed.&lt;id&gt;") + Raise("entity.destroyed")。
+    /// 纯读取零 Harmony；只在有人订阅时工作（无订阅零开销）。
+    /// </summary>
+    private static void PollEntityDestroyed(float dt)
+    {
+        if (!HasScriptedEventPrefix("entity.destroyed")) return;
+        _entityEventTimer += dt;
+        if (_entityEventTimer < 0.5f) return;
+        _entityEventTimer = 0f;
+        try
+        {
+            var fm = FireMission.Instance;
+            if (fm == null || fm.Entities == null) return;
+            // 新增/存活实体记入
+            try
+            {
+                var en = fm.Entities.GetEnumerator();
+                while (en.MoveNext())
+                {
+                    var kv = en.Current;
+                    if (kv == null) continue;
+                    string id = null; MapEntity e = null;
+                    try { id = kv.Key; e = kv.Value; } catch { }
+                    if (!string.IsNullOrEmpty(id) && e != null && e.IsAlive && e.Health > 0)
+                        _knownEntities.Add(id);
+                }
+            }
+            catch { }
+            // 已知实体死亡检测（alive→dead 或已移除）
+            if (_knownEntities.Count == 0) return;
+            var dead = new List<string>();
+            foreach (var id in _knownEntities)
+                if (IsEntityDead(id)) dead.Add(id);
+            for (int i = 0; i < dead.Count; i++)
+            {
+                _knownEntities.Remove(dead[i]);
+                CoopLog.Debug("onc.mission.script", () => $"OncMission entity destroyed detected: '{dead[i]}'");
+                Raise("entity.destroyed." + dead[i], dead[i]);
+                Raise("entity.destroyed", dead[i]);
+            }
+        }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission poll entity destroyed error: {ex.Message}"); }
+    }
+
+    /// <summary>实体是否已摧毁（FireMission.Entities 查 IsAlive/Health；找不到 = 已摧毁，防卡）。</summary>
+    private static bool IsEntityDead(string entityId)
+    {
+        try
+        {
+            var fm = FireMission.Instance;
+            if (fm == null || fm.Entities == null) return false;
+            MapEntity ent = null;
+            try { if (fm.Entities.TryGetValue(entityId ?? "", out var e)) ent = e; } catch { }
+            if (ent == null) return true; // 找不到 = 已摧毁（防卡）
+            return !ent.IsAlive || ent.Health <= 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>A3：原生图变量桥接——把当前原生 MissionGraph.Variables 快照进 ctx.Variables（脚本模块可读）。
+    /// 写回：模块调 <see cref="SetNativeGraphVariable"/>（原生图变量写，经 interop，需游戏实测）。</summary>
+    private static void BridgeNativeVariables(OncScriptContext ctx, SleepyNodes.MissionGraph graph)
+    {
+        try
+        {
+            if (ctx == null || graph == null) return;
+            var vars = graph.Variables;
+            if (vars == null) return;
+            var en = vars.GetEnumerator();
+            while (en.MoveNext())
+            {
+                var kv = en.Current;
+                if (kv == null) continue;
+                string k = null; object v = null;
+                try { k = kv.Key; v = kv.Value; } catch { }
+                if (!string.IsNullOrEmpty(k)) ctx.Variables[k] = v;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>A3：写原生图变量（当前原生任务 MissionGraph.Variables）。⚠️ 类型经 interop，需游戏实测。</summary>
+    public static void SetNativeGraphVariable(string name, object value)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(name)) return;
+            var mm = MissionManager.Instance;
+            if (mm == null || mm.CurrentMission == null) return;
+            var vars = mm.CurrentMission.Variables;
+            if (vars == null) return;
+            // 值转 Il2CppSystem.Object（interop 索引器 setter 期望 Il2Cpp 对象；托管 string 隐式转 Il2CppString）
+            if (value is Il2CppSystem.Object io) vars[name] = io;
+            else { Il2CppSystem.String ilstr = value?.ToString() ?? ""; vars[name] = ilstr; }
+        }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission set native var error: {ex.Message}"); }
+    }
+
+    /// <summary>脚本化模块名 → 原生 State_CustomTrackingVariable 载体键（variableName 前缀约定）。</summary>
+    private const string ScriptedPrefix = "onc.script.";
+
+    /// <summary>脚本化锚点节点 ID 前缀（节点 ID "onc_script_&lt;name&gt;" → 分派模块 &lt;name&gt;）。</summary>
+    private const string ScriptedIdPrefix = "onc_script_";
+
+    /// <summary>注册内置脚本化模块（示例/通用工具，启动时调用）：
+    /// - "announce"：从 ModuleArgs JSON 读 {"title","text","duration"} 弹通知；
+    /// - "ping"：日志。
+    /// 模组/任务作者可用 <see cref="RegisterScriptedModule"/> 注册自己的模块。</summary>
+    public static void RegisterBuiltinScriptedModules()
+    {
+        RegisterScriptedModule("announce", ctx =>
+        {
+            string title = null, text = null; float duration = 4f;
+            try
+            {
+                if (!string.IsNullOrEmpty(ctx.Args))
+                {
+                    var o = OncJson.ParseObject(ctx.Args);
+                    if (o != null)
+                    {
+                        title = OncJson.GetString(o, "title");
+                        text = OncJson.GetString(o, "text");
+                        duration = OncJson.GetFloat(o, "duration", 4f);
+                    }
+                }
+            }
+            catch { }
+            ctx.Host?.ShowNotification(title ?? "脚本化模块", text ?? "announce 已执行", duration);
+        });
+        RegisterScriptedModule("ping", ctx =>
+            CoopLog.Info("onc.mission.script", () => $"OncMission scripted ping (args='{ctx.Args}')"));
+
+        // ---- B6：声明式 JSON 内置模块库（JSON ModuleName 直接可用，无需 C# 注册）----
+        // 参数：ModuleArgs 为 JSON 对象字符串，字段见各模块。
+        RegisterScriptedModule("print", ctx =>
+        {
+            string text = null;
+            try { if (!string.IsNullOrEmpty(ctx.Args)) { var o = OncJson.ParseObject(ctx.Args); if (o != null) text = OncJson.GetString(o, "text"); } } catch { }
+            ctx.Host?.PrintTeleprinter(text ?? "（脚本模块 print：缺 text 参数）");
+        });
+        RegisterScriptedModule("requisition", ctx =>
+        {
+            int amount = 0;
+            try { if (!string.IsNullOrEmpty(ctx.Args)) { var o = OncJson.ParseObject(ctx.Args); if (o != null) amount = OncJson.GetInt(o, "amount"); } } catch { }
+            ctx.Host?.AddRequisitionPoints(amount);
+        });
+        RegisterScriptedModule("shell", ctx =>
+        {
+            string shellId = null; int amount = 0;
+            try
+            {
+                if (!string.IsNullOrEmpty(ctx.Args))
+                {
+                    var o = OncJson.ParseObject(ctx.Args);
+                    if (o != null) { shellId = OncJson.GetString(o, "shell"); amount = OncJson.GetInt(o, "amount"); }
+                }
+            }
+            catch { }
+            if (!string.IsNullOrEmpty(shellId)) ctx.Host?.AddShell(shellId, amount, -1);
+        });
+        RegisterScriptedModule("powder", ctx =>
+        {
+            int amount = 0;
+            try { if (!string.IsNullOrEmpty(ctx.Args)) { var o = OncJson.ParseObject(ctx.Args); if (o != null) amount = OncJson.GetInt(o, "amount"); } } catch { }
+            ctx.Host?.AddPowderCharge(amount);
+        });
+        RegisterScriptedModule("log", ctx =>
+            CoopLog.Info("onc.mission.script", () => $"[script:{ctx.ModuleName}] args='{ctx.Args}'"));
+    }
+
+    /// <summary>
+    /// 扫描原生任务 JSON 的脚本锚点节点（State_CustomTrackingVariable 载体，variableName="onc.script.&lt;name&gt;"
+    /// 或节点 ID "onc_script_&lt;name&gt;"）→ 注册进 <see cref="_nativeScriptedNodes"/>。
+    /// 由 RegisterNativeFromJson 调用（Import 前从 raw JSON 扫描，不依赖 ImportMission 字段还原）。
+    /// </summary>
+    private static void ScanNativeScriptedNodes(string json)
+    {
+        try
+        {
+            var root = OncJson.ParseObject(json);
+            if (root == null) return;
+            var inner = UnwrapMissionJson(root);
+            var src = inner ?? root;
+            if (!src.TryGetValue("Nodes", out var nodesObj) || !(nodesObj is Dictionary<string, object> nodes)) return;
+            foreach (var kv in nodes)
+            {
+                var node = kv.Value as Dictionary<string, object>;
+                if (node == null) continue;
+                string nodeId = OncJson.GetString(node, "ID");
+                if (string.IsNullOrEmpty(nodeId)) nodeId = kv.Key;
+                string module = null;
+                var nd = OncJson.GetObject(node, "NodeData");
+                if (nd != null)
+                {
+                    string vn = OncJson.GetString(nd, "variableName");
+                    if (!string.IsNullOrEmpty(vn) && vn.StartsWith(ScriptedPrefix, StringComparison.Ordinal))
+                        module = vn.Substring(ScriptedPrefix.Length);
+                }
+                if (module == null && nodeId.StartsWith(ScriptedIdPrefix, StringComparison.Ordinal))
+                    module = nodeId.Substring(ScriptedIdPrefix.Length);
+                if (!string.IsNullOrEmpty(module))
+                {
+                    _nativeScriptedNodes[nodeId] = module;
+                    CoopLog.Debug("onc.mission.script", () => $"OncMission scripted anchor node '{nodeId}' -> module '{module}'");
+                }
+            }
+        }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission scan scripted nodes error: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// 检测原生图脚本锚点节点进入（每帧轮询 CurrentState，纯读取零 Harmony 风险——不碰状态机内部）。
+    /// 约定：进入 variableName="onc.script.&lt;name&gt;" 的 State_CustomTrackingVariable 节点，
+    /// 或节点 ID "onc_script_&lt;name&gt;" 时，分派脚本模块。只对【我们的原生格式自定义图】生效。
+    /// </summary>
+    private static void PollNativeScripted()
+    {
+        try
+        {
+            var mm = MissionManager.Instance;
+            if (mm == null || mm.CurrentMission == null) return;
+            if (!IsNativeCustomGraph(mm.CurrentMission)) return;
+            string nodeId = null;
+            try { nodeId = mm.CurrentMission.CurrentState?.Node?.NodeID; } catch { }
+            if (string.IsNullOrEmpty(nodeId)) return;
+            if (nodeId == _lastScriptedNativeNode) return; // 同节点不重复触发
+            _lastScriptedNativeNode = nodeId;
+            string module = null;
+            if (_nativeScriptedNodes.TryGetValue(nodeId, out var m0)) module = m0;
+            else if (nodeId.StartsWith(ScriptedIdPrefix, StringComparison.Ordinal)) module = nodeId.Substring(ScriptedIdPrefix.Length);
+            if (string.IsNullOrEmpty(module)) return;
+            CoopLog.Info("onc.mission.script", () => $"OncMission native scripted anchor entered node='{nodeId}' -> module='{module}'");
+            var sctx = new OncScriptContext { ModuleName = module };
+            BridgeNativeVariables(sctx, mm.CurrentMission); // A3：原生图变量桥接（读快照）
+            RunScriptedModule(sctx);
+        }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission poll scripted error: {ex.Message}"); }
+    }
 
     public static bool RegisterNativeFromJson(string json)
     {
@@ -115,6 +514,7 @@ public static class OncMissionBridge
                         var im = new OncMission { Id = imid, DisplayName = imname, MissionType = imtype };
                         Register(im);
                         _nativeRaw[imid] = json; // 存完整 ExportPackage（Import 时原样传，保留 Files/package 上下文）
+                        ScanNativeScriptedNodes(json);
                         CoopLog.Info("onc.mission.native", () => $"OncMission native (export pkg) registered: '{imid}' ({imname})");
                         return true;
                     }
@@ -129,6 +529,7 @@ public static class OncMissionBridge
             var m = new OncMission { Id = mid, DisplayName = mname, MissionType = mtype };
             Register(m); // 占位（卡片显示用；节点/目标由原生图驱动）
             _nativeRaw[mid] = json;
+            ScanNativeScriptedNodes(json);
             CoopLog.Info("onc.mission.native", () => $"OncMission native registered: '{mid}' ({mname})");
             return true;
         }
@@ -1773,10 +2174,37 @@ public static class OncMissionBridge
                 if (op.nodes != null) op.nodes.Add(mn);
             }
             catch (Exception ex) { CoopLog.Warn("onc.mission.native", () => $"OncMission StartNative op build: {ex.Message}"); }
-            // 启动原生图（图启动由 PostMissionLoaded 在 OnMissionLoaded 后调 graph.Run() 完成——
-            // StartOperation 本身不建立主执行线 CurrentState；见 OncMissionHooks.PostMissionLoaded）
-            mm.StartOperation(op, graph);
-            CoopLog.Info("onc.mission.native", () => $"OncMission native StartOperation('{id}') ok");
+            // 启动原生图：优先 3-arg StartOperation + 非空 checkpoint（触发 StartMissionRuntime → 原生任务引擎
+            // 完整启动，每帧驱动图推进到 State_End：打字机/通知/床交互全原生行为——用户实测 0.2.0 正常结束）。
+            // 2-arg 无 checkpoint 不启动 StartMissionRuntime → 图不被原生引擎驱动，graph.Run() 建的执行线
+            // 在下一帧被重置为 no state（实测 `current=(no state)` 持续、任务卡住）。3-arg 是修复关键。
+            // ⚠️ 兜底：若 3-arg 后仍无执行线，PostMissionLoaded 会对 native 自定义图调 graph.Run() 建立。
+            try
+            {
+#if MELONLOADER
+                // MelonLoader Il2CppAssemblies 缺 MissionSaveData 类型（旧 interop）→ 直接 2-arg
+                // （PostMissionLoaded 对 native 自定义图调 graph.Run() 兜底建执行线）
+                mm.StartOperation(op, graph);
+                CoopLog.Info("onc.mission.native", () => $"OncMission native StartOperation('{id}') 2-arg (ML interop lacks MissionSaveData)");
+#else
+                var checkpoint = new MissionSaveData();
+                try
+                {
+                    checkpoint.MissionId = id;
+                    checkpoint.OperationId = "onc." + id;
+                    checkpoint.MissionElapsedTime = 0.0;
+                }
+                catch { }
+                mm.StartOperation(op, graph, checkpoint);
+                CoopLog.Info("onc.mission.native", () => $"OncMission native StartOperation('{id}') 3-arg + checkpoint (full task engine runtime)");
+#endif
+            }
+            catch (Exception sox)
+            {
+                // 3-arg 失败 → 回退 2-arg（尽力启动；PostMissionLoaded graph.Run() 兜底）
+                CoopLog.Warn("onc.mission.native", () => $"OncMission native StartOperation 3-arg error ({sox.Message}), fallback 2-arg");
+                try { mm.StartOperation(op, graph); } catch { }
+            }
             // ⚠️ 诊断：StartOperation 后图 EntryPoint 是否被识别
             try
             {
@@ -2027,6 +2455,7 @@ public static class OncMissionBridge
             Stop();
             var runtime = new OncMissionRuntime(mission, host);
             _current = runtime;
+            AttachScriptedLifecycle(runtime); // B3：脚本模块生命周期（启动钩子 + 结束事件订阅）
             try { host.ApplySeed(mission); } catch (Exception ex) { CoopLog.Warn("onc.mission.seed", () => $"OncMission seed apply error: {ex.Message}"); }
             runtime.Start();
             CoopLog.Info("onc.mission.start", () => $"OncMission started(in scene): '{mission.Id}' nodes={mission.Nodes?.Count ?? 0}");
@@ -2063,6 +2492,7 @@ public static class OncMissionBridge
             Stop();
             var runtime = new OncMissionRuntime(mission, host);
             _current = runtime;
+            AttachScriptedLifecycle(runtime); // B3：脚本模块生命周期（启动钩子 + 结束事件订阅）
 
             try
             {
@@ -2088,20 +2518,254 @@ public static class OncMissionBridge
 
     public static void Stop()
     {
+        _pendingReturnMission = null; // 取消待结算（新任务启动/手动停止）
+        _nativeReturnPending = false; // 取消原生结算等待
         if (_current == null) return;
         try
         {
             if (_current.IsRunning) _current.Cancel();
         }
         catch (Exception ex) { CoopLog.Warn("onc.mission.stop", () => $"OncMission Stop error: {ex.Message}"); }
+        try { NotifyScriptedLifecycle(false, _current); } catch { } // B3：脚本模块生命周期结束
         _current = null;
         OncMissionHud.Hide();
+    }
+
+    /// <summary>任务完成后走原生返回（2026-08-30）：构造原生上下文（CurrentOperation/CurrentMission =
+    /// 导出的原生图）再调 MarkMissionComplete/MarkMissionFailed → 原生结算界面正常显示 + dismiss 返回，
+    /// 原生引擎的结算/统计参数传递完整（直接 LoadMainMenu 会跳过原生结算，参数失效）。
+    /// Core 任务没走 StartOperation 时 CurrentOperation 为 null，结算界面 dismiss 回调断裂会卡死——
+    /// 这里手动补上原生上下文让原生结算流程完整走通。
+    /// ⚠️ 2026-08-30：不能立即执行——任务完成时场景可能还在加载（SceneManager.LoadScene 异步/初始化延迟），
+    /// MissionManager.Instance 可能为 null。改为 pending 调度，Update 里每帧检查场景就绪后执行（带超时兜底）。</summary>
+    private static void TryNativeReturn(OncMissionRuntime runtime, bool failed)
+    {
+        _pendingReturnMission = runtime;
+        _pendingReturnFailed = failed;
+        _pendingReturnTimer = 0f;
+        CoopLog.Info("onc.mission.return", () => "OncMission native return scheduled (wait for scene/MissionManager ready)");
+        // 立即尝试一次（若场景已就绪则马上结算；否则交给 Update 重试）
+        TryPendingNativeReturn();
+    }
+
+    /// <summary>每帧尝试待结算任务：场景/ MissionManager 就绪才执行原生结算。由 <see cref="Update"/> 调用。</summary>
+    private static void TryPendingNativeReturn()
+    {
+        if (_pendingReturnMission == null) return;
+        try
+        {
+            // 1) 等 MissionManager 就绪（Instance 或场景组件）
+            var mm = MissionManager.Instance;
+            if (mm == null)
+            {
+                try { mm = UnityEngine.Object.FindFirstObjectByType<MissionManager>(); }
+                catch { }
+            }
+            if (mm == null)
+            {
+                _pendingReturnTimer += 0f; // 计时由 Update 累计
+                return; // 还没就绪，等下一帧
+            }
+            var m = _pendingReturnMission;
+            bool failed = _pendingReturnFailed;
+            _pendingReturnMission = null; // 先清再执行（防重入）
+            CoopLog.Info("onc.mission.return", () => $"OncMission MissionManager ready (t={_pendingReturnTimer:0.0}s) → native return");
+            TryNativeReturnWith(mm, m, failed);
+        }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.return", () => $"OncMission pending return error: {ex.Message}"); }
+    }
+
+    /// <summary>执行原生结算：设原生上下文 + MarkMissionComplete/Failed。需 MissionManager 已就绪。</summary>
+    private static void TryNativeReturnWith(MissionManager mm, OncMissionRuntime runtime, bool failed)
+    {
+        try
+        {
+            if (runtime?.Mission == null) return;
+            var mission = runtime.Mission;
+            // ⚠️ 2026-08-30：优先复用 StartOperation 3-arg 建立、正被原生任务引擎驱动的 CurrentMission（同一图，
+            // 任务引擎驱动它推进到 State_End → 床可交互）。重新 Import 会新建不同图 → CurrentMission.Update()
+            // 驱动的是另一张图，结算上下文断裂。
+            SleepyNodes.MissionGraph graph = null;
+            try
+            {
+                var cm = mm.CurrentMission;
+                if (cm != null)
+                {
+                    string cmId = "?"; try { cmId = cm.MissionID; } catch { }
+                    if (cmId == mission.Id) graph = cm;
+                    else CoopLog.Warn("onc.mission.return", () => $"OncMission return: CurrentMission id='{cmId}' != '{mission.Id}' (reuse skipped)");
+                }
+            }
+            catch { }
+            // 复用失败 → 导出 Core 任务重新 Import（兜底）
+            if (graph == null)
+            {
+                string json = OncMissionImporter.ExportMission(mission);
+                if (!string.IsNullOrEmpty(json))
+                {
+                    try { graph = OncMissionImporter.Import(json); } catch (Exception ex) { CoopLog.Warn("onc.mission.return", () => $"OncMission return import: {ex.Message}"); }
+                }
+            }
+            // 2) 构造 OperationGraph（含 MissionNode.Mission=图）→ 设 CurrentOperation（结算 dismiss 回调需要）
+            try
+            {
+                var op = new SleepyNodes.OperationGraph();
+                var mn = new SleepyNodes.MissionNode();
+                try { mn.Mission = graph; } catch { }
+                if (op.nodes != null) op.nodes.Add(mn);
+                mm.CurrentOperation = op;
+            }
+            catch (Exception ex) { CoopLog.Warn("onc.mission.return", () => $"OncMission return op: {ex.Message}"); }
+            // 3) 设 CurrentMission（结算界面读 mission/state；若已复用则同一引用）
+            if (graph != null)
+            {
+                try { mm.CurrentMission = graph; } catch (Exception ex) { CoopLog.Warn("onc.mission.return", () => $"OncMission return mission: {ex.Message}"); }
+                // ⚠️ 2026-08-30（用户类比引擎：缺完整启动流程）：原生结算界面/床交互需要原生任务状态机
+                // "在运行中"——像引擎 running 是默认值没走启动边沿一样，Core 任务没 graph.Run() 时
+                // CurrentState=(no state)，MarkMissionComplete(true) 只强制标记 MissionState.Complete，
+                // 结算界面/统计（TrackingValues）不完整 → "原生结算没活"。需手动 graph.Run() 建立执行线，
+                // 让原生引擎沿 To 推进到 State_End（完整结算：奖章/统计/床交互可用）。
+                // ⚠️ 关键：graph.Run() 后**不要立即 MarkMissionComplete**——原生引擎每帧 Update 会自动驱动
+                // CurrentMission 推进到 State_End，由原生流程触发完整结算（像 StartNative 那样）。立即
+                // MarkMissionComplete 会跳过原生推进（state 才 n2 就标记完成 → 结算数据不完整）。
+                try
+                {
+                    var cs = graph.CurrentState;
+                    if (cs == null)
+                    {
+                        // ⚠️ 2026-08-30 FIX：graph.Run() 只用于"建立执行线"，**不要提前 return**。
+                        // 之前在这里 return 导致下面 CurrentMissionState.Complete=true（床交互激活）永远不执行
+                        // → "问题依旧"（床不可交互）。现在 Run() 后继续走 Complete=true 双保险：
+                        // 原生引擎若推进则走 State_End；若停在 n2，床仍因 Complete=true 而可交互。
+                        graph.Run();
+                        CoopLog.Info("onc.mission.return", () => "OncMission return: graph.Run() to establish native execution line (settlement alive)");
+                        string after = "?";
+                        try { after = graph.CurrentState == null ? "(still null)" : (graph.CurrentState.Node?.NodeID ?? "?"); } catch { }
+                        CoopLog.Info("onc.mission.return", () => $"OncMission return: after Run() state={after} → continue to set CurrentMissionState.Complete (bed interactive)");
+                    }
+                    else
+                    {
+                        CoopLog.Info("onc.mission.return", () => "OncMission return: graph already has execution line");
+                    }
+                }
+                catch (Exception rex) { CoopLog.Warn("onc.mission.return", () => $"OncMission return run err: {rex.Message}"); }
+            }
+            // 4) ⚠️ 2026-08-30 实测定案（docs §D2）：设好原生上下文（CurrentOperation/CurrentMission）后
+            // **调 MarkMissionComplete/MarkMissionFailed 触发原生结算界面**（EndOfMissionUIController 显示 +
+            // dismiss 返回，原生引擎结算/统计参数传递完整）。
+            // ⚠️ 不依赖"设 CurrentMissionState.Complete 让床可交互"——Core 导出图的原生引擎驱动不可靠
+            // （停在 n2），床交互是**原生格式任务**（StartNative 完整引擎）专属。Core 任务正确结算 = MarkMissionComplete。
+            // 停止 Core runtime（避免 Core 与原生图双驱动节点——打字机打两遍）
+            try { if (_current != null && _current.IsRunning) _current.Cancel(); } catch { }
+            // 设等待：等原生图推进（打字机打完）→ MarkMissionComplete 触发结算界面。Update 里驱动 + 触发。
+            _nativeReturnPending = true;
+            _nativeReturnWaitTimer = 0f;
+            _nativeReturnMarkDone = false; // 是否已调 MarkMissionComplete/MarkMissionFailed
+            _nativeReturnFailed = failed;
+            CoopLog.Info("onc.mission.return", () => $"OncMission return: native settlement pending (failed={failed}) → graph advance → MarkMissionComplete → EndOfMissionUI");
+        }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.return", () => $"OncMission return error: {ex.Message}"); }
     }
 
     // ---------------- 驱动 / 事件 ----------------
 
     public static void Update(float dt)
     {
+        // ⚠️ 任务完成后延迟原生结算（2026-08-30）：等场景/MissionManager 就绪再执行；超时兜底不再尝试
+        if (_pendingReturnMission != null)
+        {
+            _pendingReturnTimer += dt;
+            if (_pendingReturnTimer >= 10f)
+            {
+                CoopLog.Warn("onc.mission.return", () => $"OncMission native return timed out (t={_pendingReturnTimer:0.0}s) — MissionManager never ready, skip native settlement");
+                // ⚠️ 2026-08-30 诊断：超时说明 MissionBase 场景可能没有 MissionManager 组件（自定义任务直接
+                // LoadScene 跳过了 StartOperation 的原生初始化）。dump 场景状态确认根因（场景名/根物体/MM 组件数）。
+                try
+                {
+                    var sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+                    int mmAll = 0;
+                    string rootNames = "";
+                    try
+                    {
+                        var all = UnityEngine.Object.FindObjectsOfType<MissionManager>(true);
+                        mmAll = all != null ? all.Length : 0;
+                        var roots = sc.GetRootGameObjects();
+                        for (int i = 0; i < roots.Length && i < 25; i++)
+                            rootNames += (rootNames.Length > 0 ? "," : "") + roots[i].name;
+                    }
+                    catch (Exception de) { rootNames = "(err " + de.Message + ")"; }
+                    CoopLog.Warn("onc.mission.return", () => $"OncMission return diag: scene='{sc.name}' loaded={sc.isLoaded} rootCount={sc.rootCount} MissionManagerObjs={mmAll} roots=[{rootNames}]");
+                }
+                catch (Exception dx) { CoopLog.Warn("onc.mission.return", () => $"OncMission return diag err: {dx.Message}"); }
+                _pendingReturnMission = null;
+            }
+            else
+            {
+                TryPendingNativeReturn();
+            }
+        }
+        // ⚠️ 原生结算等待（2026-08-30 实测定案 docs §D2）：设好原生上下文后，驱动原生图推进（打字机打完），
+        // 再调 MarkMissionComplete/MarkMissionFailed → 原生结算界面（EndOfMissionUIController）弹出 + dismiss 返回。
+        // done = 原生流程已接管（phase 离开 MissionActive / 已回主菜单或选任务）。
+        if (_nativeReturnPending)
+        {
+            _nativeReturnWaitTimer += dt;
+            // ⚠️ 手动驱动原生图推进：MissionGraph.Update() 沿 To 推进 CurrentState（StartMissionRuntime 未调用时
+            // 原生引擎不自动驱动——Core 任务走 2-arg StartOperation 没启动 runtime）。每帧调它推进到 State_End。
+            try
+            {
+                var mm = MissionManager.Instance;
+                if (mm != null && mm.CurrentMission != null)
+                    mm.CurrentMission.Update();
+            }
+            catch { }
+            // ⚠️ 触发原生结算：给原生图一点时间推进（打字机出字），再 MarkMissionComplete/MarkMissionFailed。
+            // 延迟 0.8s：让 n2/n8 打字机文本有机会打出（用户反馈"没时间看打印机"→ 任务完成太快被中断）。
+            if (!_nativeReturnMarkDone && _nativeReturnWaitTimer >= 0.8f)
+            {
+                _nativeReturnMarkDone = true;
+                try
+                {
+                    var mm = MissionManager.Instance;
+                    if (mm != null)
+                    {
+                        if (_nativeReturnFailed) { mm.MarkMissionFailed(true); CoopLog.Info("onc.mission.return", () => "OncMission return: MarkMissionFailed(true) → native settlement UI"); }
+                        else { mm.MarkMissionComplete(true); CoopLog.Info("onc.mission.return", () => "OncMission return: MarkMissionComplete(true) → native settlement UI"); }
+                    }
+                }
+                catch (Exception mex) { CoopLog.Warn("onc.mission.return", () => $"OncMission return mark err: {mex.Message}"); }
+            }
+            bool done = false;
+            try
+            {
+                var mm = MissionManager.Instance;
+                if (mm != null)
+                {
+                    string phase = "?";
+                    try { phase = mm.CurrentPhase.ToString(); } catch { }
+                    // 原生流程已接管返回（结算界面弹出后 dismiss 会切 phase / 回主菜单/选任务）
+                    if (phase == "MainMenu" || phase == "BrowsingMap")
+                        done = true;
+                    else
+                    {
+                        // 触发结算后给原生流程几秒处理（EndOfMissionUI 显示）；若 phase 仍是 MissionActive 则继续等
+                        if (_nativeReturnMarkDone && _nativeReturnWaitTimer >= 6f) done = true; // 兜底
+                    }
+                }
+            }
+            catch { }
+            if (done)
+            {
+                _nativeReturnPending = false;
+                CoopLog.Info("onc.mission.return", () => $"OncMission native settlement reached (t={_nativeReturnWaitTimer:0.0}s) → native flow handles return");
+            }
+            // ⚠️ 兜底只防极端卡死：超时 120s 仅记录。
+            else if (_nativeReturnWaitTimer >= 120f)
+            {
+                _nativeReturnPending = false;
+                CoopLog.Warn("onc.mission.return", () => "OncMission native settlement wait exceeded 120s — stop waiting");
+            }
+        }
         // ⚠️ 帧级任务驱动链追踪（纯读取 MissionManager，零 Harmony 风险）：0.2s 采样当前执行节点，
         // 记录节点推进序列（主执行线 CurrentState.Node + 并行线 SideExecutionPaths + 事件线 EventNodes）
         _flowTimer += dt;
@@ -2125,6 +2789,12 @@ public static class OncMissionBridge
         // ⚠️ 引擎开局状态应用（JSON EngineStart="on"/"off"；场景加载后引擎对象就绪才设置）
         try { TryApplyEngineStart(dt); }
         catch (Exception ex) { CoopLog.Warn("onc.mission.native", () => $"OncMission engine start update error: {ex.Message}"); }
+        // ⚠️ 脚本化模块：检测原生图脚本锚点节点进入（State_CustomTrackingVariable 载体 / onc_script_ 节点 id）
+        try { PollNativeScripted(); }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission poll scripted update error: {ex.Message}"); }
+        // ⚠️ 脚本化模块：实体摧毁事件轮询（订阅了 entity.destroyed 前缀才工作）
+        try { PollEntityDestroyed(dt); }
+        catch (Exception ex) { CoopLog.Warn("onc.mission.script", () => $"OncMission poll entity update error: {ex.Message}"); }
         // ⚠️ 引擎供电重启状态机 + 持续保电（ForceEngineOff→ForceEngineOn 触发启动边沿升 Power，掉回则补 ForceEngineOn）
         try { UpdateEnginePowerRestart(dt); }
         catch (Exception ex) { CoopLog.Warn("onc.mission.native", () => $"OncMission engine power restart update error: {ex.Message}"); }
@@ -2205,11 +2875,8 @@ public static class OncMissionBridge
         }
     }
 
-    public static void Raise(string eventId, object payload = null)
-    {
-        if (_current == null) return;
-        _current.Raise(eventId, payload);
-    }
+    // ⚠️ Raise(string, object) 定义在脚本化模块区（事件分发 A 桥接入口：喂 Core 图 + 分派脚本模块事件订阅）——
+    // 旧的"只喂 _current"版本已移除，统一走扩展版。
 
     /// <summary>异步加载已注册任务的地图图（走默认/自定义宿主）。onLoaded 参数为 UnityEngine.Sprite（失败为 null）。</summary>
     public static void LoadMapSprite(string missionId, bool topography, Action<object> onLoaded)
@@ -2241,6 +2908,9 @@ public static class OncMissionBridge
             if (runtime.Mission != null) MarkMissionCompleted(runtime.Mission.Id); // 前置/后置解锁
             OncMissionHud.Hide();
             ShowNotification("任务完成", (runtime.Mission?.DisplayName ?? "") + " 已完成", 6f);
+            // ⚠️ 2026-08-30：走原生返回——构造原生上下文（CurrentOperation/CurrentMission）再 MarkMissionComplete，
+            // 原生结算界面正常显示并 dismiss 返回（原生引擎结算/统计参数传递完整；直接 LoadMainMenu 会跳过原生结算）。
+            TryNativeReturn(runtime, false);
         }
 
         public override void OnMissionFailed(OncMissionRuntime runtime)
@@ -2248,6 +2918,8 @@ public static class OncMissionBridge
             CoopLog.Info("onc.host.fail", () => $"OncMission failed '{runtime.Mission?.Id}'");
             OncMissionHud.Hide();
             ShowNotification("任务失败", (runtime.Mission?.DisplayName ?? "") + " 失败", 6f);
+            // ⚠️ 2026-08-30：走原生返回（MarkMissionFailed 原生结算界面 + dismiss 返回）。
+            TryNativeReturn(runtime, true);
         }
 
         public override void OnMissionCanceled(OncMissionRuntime runtime)
@@ -2272,51 +2944,89 @@ public static class OncMissionBridge
             {
                 if (mission == null || string.IsNullOrEmpty(mission.SceneName)) return true; // 当前场景
 
-                // 自定义任务：直接 Unity 加载任务场景（跳过原生 MapCard.ActivateMission，避免启动原生任务；
-                // 进入场景后由 OncMissionRuntime 驱动自定义任务：打字机简报/通知/目标/实体）。
-                UnityEngine.SceneManagement.SceneManager.LoadScene(mission.SceneName,
-                    UnityEngine.SceneManagement.LoadSceneMode.Single);
-                CoopLog.Info("onc.host.scene", () => $"OncMission scene: SceneManager.LoadScene('{mission.SceneName}')");
-                // 黑屏排查：场景就绪后检查相机 + 场景内容（确认黑屏是空场景 vs 相机视角 vs 渲染）
+                // ⚠️ 2026-08-30（实测修正）：Core 任务**必须走原生 StartOperation 流程加载场景**，不能裸
+                // SceneManager.LoadScene——MissionBase 等任务场景是空壳（仅 TempMapRoot/PlayerSpawnTrigger 等
+                // 框架对象），完整内容（炮台/地图/实体，~5800 renderer）由原生 StartOperation→LoadMission 动态生成；
+                // 裸 LoadScene 会：① 场景内容不生成 → 黑屏；② 绕过 MissionManager 生命周期 → 结算时 MissionManager
+                // 不可用（"卡结算"）。因此：导出 Core 任务为原生图 → 构造 OperationGraph → mm.StartOperation。
+                var mm = MissionManager.Instance;
+                if (mm == null)
+                {
+                    // ⚠️ MissionManager 不存在（未走原生主菜单流程）→ 回退裸 LoadScene（尽力加载场景，结算不可用）
+                    CoopLog.Warn("onc.host.scene", () => "OncMission scene: MissionManager null, fallback SceneManager.LoadScene (settlement unavailable)");
+                    UnityEngine.SceneManagement.SceneManager.LoadScene(mission.SceneName,
+                        UnityEngine.SceneManagement.LoadSceneMode.Single);
+                    return true;
+                }
+                // 1) 导出 Core 任务 → 原生 MissionGraph（StartOperation 需要真图；含 SceneName 引用）
+                string json = OncMissionImporter.ExportMission(mission);
+                var graph = OncMissionImporter.Import(json);
+                if (graph == null)
+                {
+                    CoopLog.Warn("onc.host.scene", () => "OncMission scene: import failed, fallback SceneManager.LoadScene");
+                    UnityEngine.SceneManagement.SceneManager.LoadScene(mission.SceneName,
+                        UnityEngine.SceneManagement.LoadSceneMode.Single);
+                    return true;
+                }
+                // 场景引用（Import 后默认 MissionBase；确保用任务声明的场景）
                 try
                 {
-                    var cams = UnityEngine.Object.FindObjectsOfType<Camera>(true);
-                    int active = 0;
-                    string names = "";
-                    for (int i = 0; i < cams.Length; i++)
-                    {
-                        if (cams[i] == null) continue;
-                        if (cams[i].gameObject.activeSelf) active++;
-                        names += (names.Length > 0 ? "," : "") + cams[i].name + (cams[i].gameObject.activeSelf ? "" : "(i)");
-                    }
-                    string main = Camera.main != null ? Camera.main.name : "null";
-                    string camPos = "?";
-                    try
-                    {
-                        if (Camera.main != null)
-                        {
-                            var cp = Camera.main.transform.position;
-                            var cr = Camera.main.transform.rotation.eulerAngles;
-                            camPos = $"({cp.x:0.#},{cp.y:0.#},{cp.z:0.#}) rot=({cr.x:0.#},{cr.y:0.#},{cr.z:0.#})";
-                        }
-                    }
-                    catch { }
-                    // 场景内容：根物体数 / Renderer 数 / 活动 Renderer 数
-                    int roots = 0, renderers = 0, activeRenderers = 0;
-                    try
-                    {
-                        var sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
-                        roots = sc.rootCount;
-                        var rends = UnityEngine.Object.FindObjectsOfType<Renderer>(true);
-                        renderers = rends.Length;
-                        for (int i = 0; i < rends.Length; i++)
-                            if (rends[i] != null && rends[i].gameObject.activeSelf) activeRenderers++;
-                    }
-                    catch { }
-                    CoopLog.Info("onc.host.scene", () => $"OncMission scene cam='{main}' active={active} pos={camPos} roots={roots} renderers={renderers} activeR={activeRenderers}");
+                    var sr = new MissionSceneReference { sceneName = mission.SceneName };
+                    graph.SceneReference = sr;
                 }
-                catch (Exception ex) { CoopLog.Warn("onc.host.scene", () => $"OncMission cam diag: {ex.Message}"); }
-                return true;
+                catch (Exception ex) { CoopLog.Warn("onc.host.scene", () => $"OncMission scene: set SceneReference err: {ex.Message}"); }
+                // 2) 构造 OperationGraph（含 MissionNode.Mission=图）→ StartOperation 原生加载场景+初始化。
+                // ⚠️ 2026-08-30（用户澄清："和修补原生引擎一样——原生任务引擎"）：必须让**原生任务引擎完整启动**
+                // （StartMissionRuntime 每帧驱动 graph 推进），否则图停在 Start 不推进、床交互/完整结算不活。
+                // 2-arg StartOperation 不建立执行线（CurrentState null）→ 图不驱动。**3-arg 带非空 MissionSaveData**
+                // 走完整启动链（StartMissionRuntime）→ 任务引擎驱动到 State_End → 床可交互 → 上床睡觉 → 原生结算返回。
+                try
+                {
+                    var op = new SleepyNodes.OperationGraph();
+                    var mn = new SleepyNodes.MissionNode();
+                    try { mn.Mission = graph; } catch { }
+                    if (op.nodes != null) op.nodes.Add(mn);
+#if MELONLOADER
+                    // MelonLoader interop 缺 MissionSaveData → 2-arg（尽力加载场景）
+                    mm.StartOperation(op, graph);
+                    CoopLog.Info("onc.host.scene", () => $"OncMission scene: StartOperation 2-arg (ML interop lacks MissionSaveData)");
+                    return true;
+#else
+                    // 非空 checkpoint：触发完整 StartMissionRuntime（任务引擎启动，像引擎 ForceEngineOn 触发完整启动）
+                    var checkpoint = new MissionSaveData();
+                    try
+                    {
+                        checkpoint.MissionId = mission.Id;
+                        checkpoint.OperationId = "onc." + mission.Id;
+                        checkpoint.MissionElapsedTime = 0.0;
+                    }
+                    catch { }
+                    mm.StartOperation(op, graph, checkpoint);
+                    CoopLog.Info("onc.host.scene", () => $"OncMission scene: StartOperation(3-arg + checkpoint) via native flow (full task engine runtime start)");
+                    return true;
+#endif
+                }
+                catch (Exception ex)
+                {
+                    // 3-arg 失败 → 回退 2-arg（尽力加载场景）
+                    CoopLog.Warn("onc.host.scene", () => $"OncMission scene: StartOperation 3-arg error ({ex.Message}), fallback 2-arg");
+                    try
+                    {
+                        var op2 = new SleepyNodes.OperationGraph();
+                        var mn2 = new SleepyNodes.MissionNode();
+                        try { mn2.Mission = graph; } catch { }
+                        if (op2.nodes != null) op2.nodes.Add(mn2);
+                        mm.StartOperation(op2, graph);
+                        return true;
+                    }
+                    catch (Exception ex2)
+                    {
+                        CoopLog.Warn("onc.host.scene", () => $"OncMission scene: StartOperation 2-arg error, fallback LoadScene: {ex2.Message}");
+                        UnityEngine.SceneManagement.SceneManager.LoadScene(mission.SceneName,
+                            UnityEngine.SceneManagement.LoadSceneMode.Single);
+                        return true;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -2508,6 +3218,41 @@ public static class OncMissionBridge
                 CoopLog.Debug("onc.host.impact", () => $"OncMission trigger impact at ({x:0.#},{y:0.#}) (override host)");
             }
             catch (Exception ex) { CoopLog.Warn("onc.host.impact", () => $"OncMission TriggerImpact error: {ex.Message}"); }
+        }
+
+        public override void RunScriptedModule(OncScriptContext ctx)
+            => OncMissionBridge.RunScriptedModule(ctx); // 分派到 OncMissionBridge 脚本模块注册表
+
+        /// <summary>B1 脚本化条件：分派模块读 BoolResult（true → To[0]，false → To[1]）。</summary>
+        public override bool RunScriptedCondition(OncScriptContext ctx)
+        {
+            if (ctx == null) return true;
+            ctx.BoolResult = false;
+            OncMissionBridge.RunScriptedModule(ctx); // 模块设 ctx.BoolResult
+            return ctx.BoolResult;
+        }
+
+        /// <summary>B2 脚本化挂起：每帧问模块"好了没"（BoolResult=true 才完成）。</summary>
+        public override bool RunScriptedWait(OncScriptContext ctx)
+        {
+            if (ctx == null) return true;
+            ctx.BoolResult = false;
+            OncMissionBridge.RunScriptedModule(ctx);
+            return ctx.BoolResult;
+        }
+
+        /// <summary>A4 脚本事件广播：主机权威广播 + 本地触发（本端图 + 订阅）。</summary>
+        public override void BroadcastScriptEvent(string eventId, object payload)
+        {
+            MissionScriptSync.Broadcast(eventId);     // 主机权威广播（客机调用 → 上报主机转发）
+            OncMissionBridge.Raise(eventId, payload); // 本地也触发（本端图 + 订阅）
+        }
+
+        /// <summary>A2 计时器到期：Core runtime 计时器归零 → 转发全局事件（脚本模块可订阅 timer.expired.<id>）。</summary>
+        public override void OnTimerExpired(string timerId)
+        {
+            OncMissionBridge.Raise("timer.expired." + timerId, timerId);
+            OncMissionBridge.Raise("timer.expired", timerId);
         }
 
         /// <summary>异步加载任务地图图（IronRoadMap 地图/地形图，走游戏 MissionMapLoader.Acquire）。
