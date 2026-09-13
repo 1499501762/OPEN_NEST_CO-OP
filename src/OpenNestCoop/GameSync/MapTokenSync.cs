@@ -39,7 +39,7 @@ public sealed class MapTokenSync : ISyncedModule
     private bool _fullOnce; // 首次全量对齐（连接后一次，之后只广播变化，避免周期覆盖静止 Token）
     private bool _debugDumped;
     private readonly System.Collections.Generic.Dictionary<string, string> _lastSig = new(); // token id -> sig
-    /// <summary>⚠️ 2026-08-26 争抢修复（对齐 Synchrony DraggableBridge remoteControlledTokens）：远端控制中的
+    /// <summary>⚠️ 2026-08-26 争抢修复（对齐 官方联机 DraggableBridge remoteControlledTokens）：远端控制中的
     /// token id。应用远端广播后记录 → 发送循环跳过（本地不广播远端控制的 token，避免"主机↔客机互推"争抢）——
     /// 游戏本地 DraggableItem/MapPiece3D 物理会把应用后的位置改回，若我们不跳过，下一轮 SigOf 读到改回位置
     /// ≠ _lastSig（应用后位置）→ 判定变化 → 广播 → 对方又应用 → 又改回 → **无限双向互推**（"地图 Token 至少
@@ -224,7 +224,7 @@ public sealed class MapTokenSync : ISyncedModule
                     _lastSig[id] = SigOf(t);
                     continue;
                 }
-                // ⚠️ 2026-08-26 争抢修复（二）：**非拖拽 token 不广播**（对齐 Synchrony 拖拽才同步哲学）。
+                // ⚠️ 2026-08-26 争抢修复（二）：**非拖拽 token 不广播**（对齐 官方联机“拖拽才同步”的原则）。
                 // MapToken_Artillery 等是**游戏本地动态对象**（本地炮击/部署动画持续更新位置），玩家没拖它时
                 // 两端本地逻辑各自跑 → 位置天然不同 → 每 0.3s 判定"变化" → 持续广播（CLIENT changed=1 持续）。
                 // 只更新 _lastSig（作 anchor）不广播；forceFull（首次全量）例外（开局对齐）。玩家拖拽中/刚释放

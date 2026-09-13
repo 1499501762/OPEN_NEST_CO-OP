@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestUIKit.Sample.MelonLoader</AssemblyName>
+    <RootNamespace>OpenNestUIKit.Sample.MelonLoader</RootNamespace>
+    <Version>1.0.0</Version>
+    <!--
+      Sample third-party mod (MelonLoader shell) — see ..\README.md and ..\..\docs\API.md.
+      Point -p:ClientGame at a game that has MelonLoader 0.7.3 installed (its interop assemblies
+      live in <Game>\MelonLoader\). GameDir is only used to locate 0Harmony at compile time.
+    -->
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <ClientGame Condition="'$(ClientGame)'==''">$(GameDir)</ClientGame>
+    <MLBase>$(ClientGame)</MLBase>
+    <MLCore>$(ClientGame)\MelonLoader\net6</MLCore>
+  </PropertyGroup>
+
+  <!-- Same shared provider source as the BepInEx shell. -->
+  <ItemGroup>
+    <Compile Include="..\Shared\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Contract assembly. Private="false": on MelonLoader the host ships it in UserLibs/. -->
+    <ProjectReference Include="..\..\src\OpenNestUIKit.API\OpenNestUIKit.API.csproj" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader" HintPath="$(MLCore)\MelonLoader.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(MLCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Copy the sample into the game: dotnet build -c Release -p:DeployToMods=true -->
+  <Target Name="DeployToMods" AfterTargets="Build" Condition="'$(DeployToMods)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)$(AssemblyName).dll" />
+      <_DeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFolder="$(MLBase)\Mods\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed $(AssemblyName) to $(MLBase)\Mods\" />
+  </Target>
+
+</Project>

@@ -142,6 +142,10 @@ public static class CoopLoc
     public static string Copied => LocFile.Get("Copied");
     public static string LanJoining => LocFile.Get("LanJoining");
     public static string LanMismatch => LocFile.Get("LanMismatch");
+    /// <summary>局域网房间列表超出面板高度时的提示（{0} = 未显示数量）。</summary>
+    public static string LanMoreRooms => LocFile.Get("LanMoreRooms");
+    /// <summary>复制失败提示（{0} = 要复制的文本）。</summary>
+    public static string ErrCopyFailed => LocFile.Get("ErrCopyFailed");
 
     public static string StatusIdle => LocFile.Get("StatusIdle");
     public static string StatusHosting => LocFile.Get("StatusHosting");

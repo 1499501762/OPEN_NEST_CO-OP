@@ -18,7 +18,7 @@
 ## 1. 项目结构与构建
 
 ```
-D:\Dev\Open Nest co-op\
+<主仓库目录>\
   src\OpenNestCoop\            ← 平台无关核心（BepInEx 壳的插件主体）
     Core\CoopRuntime.cs        入口：Startup() 建立网络+注册模块+Harmony
     Core\CoopBehaviour.cs      唯一帧驱动（Update → net.Update）
@@ -45,7 +45,7 @@ dotnet build src\OpenNestCoop\OpenNestCoop.csproj -c Release -p:DeployToGame=tru
 # D 端（MelonLoader）
 dotnet build src\OpenNestCoop.MelonMod\OpenNestCoop.MelonMod.csproj -c Release -p:DeployToMods=true
 # 注意：MelonMod 的 MLBase 指向 G 端 MLLoader，D 端需手动复制 dll 到 D:\...\Mods\
-Copy-Item src\OpenNestCoop.MelonMod\bin\Release\net6.0\OpenNestCoop.MelonMod.dll "D:\SteamLibrary\...\Mods\"
+Copy-Item src\OpenNestCoop.MelonMod\bin\Release\net6.0\OpenNestCoop.MelonMod.dll "<GameDir(MelonLoader)>\...\Mods\"
 # 双开测试（必须用这个，它会等 host 端口再启 client）
 .\scripts\dualtest.ps1 -Local
 ```

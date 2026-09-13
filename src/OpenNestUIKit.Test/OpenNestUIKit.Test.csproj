@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestUIKit.Test</AssemblyName>
+    <RootNamespace>OpenNestUIKit.Test</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.0.1-Alpha-4</Version>
+    <!--
+      OpenNestUIKit.Test —— **测试模组**（BepInEx 版）。
+      用途：从"外部调用方"的角度验证 OpenNestUIKit 的全部能力：
+        · 契约路径（只引 OpenNestUIKit.API，纯 .NET）
+        · 组件/布局/页面栈路径（引 OpenNestUIKit 主体，直接调组件）
+        · 原生菜单注入、原生素材、输入守卫
+        · **CLI 模拟点击/拖拽/滚动 + 断言 + 报告**（-onuktest-run=<script>）
+      ⚠️ 这是开发/验收工具（生产环境可不部署）。与 UIKit 的关系：运行时**依赖** UIKit 已加载；
+         若 UIKit 没加载，本模组只会记录"宿主离线"并继续（软依赖）。
+      说明文档：docs/UI_KIT.md §十三
+    -->
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader 入口壳仅 ML 版编译 -->
+    <Compile Remove="TestMelonEntry.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 契约（纯 .NET，第三方路径）+ 主体（直接调组件的测试路径） -->
+    <ProjectReference Include="..\OpenNestUIKit.API\OpenNestUIKit.API.csproj" />
+    <ProjectReference Include="..\OpenNestUIKit\OpenNestUIKit.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BepInExDir)\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(BepInExDir)\interop\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(BepInExDir)\interop\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(BepInExDir)\interop\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="UnityEngine.ScreenCaptureModule" HintPath="$(BepInExDir)\interop\UnityEngine.ScreenCaptureModule.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(BepInExDir)\interop\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="Unity.InputSystem" HintPath="$(BepInExDir)\interop\Unity.InputSystem.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(BepInExDir)\interop\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(BepInExDir)\interop\Il2CppSystem.Core.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(BepInExDir)\interop\Assembly-CSharp.dll" Private="false" />
+  </ItemGroup>
+
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)OpenNestUIKit.Test.dll" />
+      <_DeployFiles Include="$(TargetDir)OpenNestUIKit.Test.pdb" Condition="Exists('$(TargetDir)OpenNestUIKit.Test.pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFolder="$(BepInExDir)\plugins\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed OpenNestUIKit.Test to $(BepInExDir)\plugins\" />
+  </Target>
+
+</Project>

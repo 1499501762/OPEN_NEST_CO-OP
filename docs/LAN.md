@@ -109,10 +109,19 @@ sequenceDiagram
 | 房间名 / 房间密码 / 最大人数 | 与 Steam 选项卡**共用同一份输入值**（`_roomName`/`_roomPassword`/`PendingMaxPlayers`），切选项卡不丢 |
 | 端口 | 输入框（`kind=5`）：主机监听 / 客机连接都用它；默认取配置 `[LAN] Port` |
 | 创建局域网房间 | 大按钮（居中）；成功后上方显示本机 IP:端口 |
-| 本机 IP | 显示所有 IPv4 + 端口，右侧 `复制` 按钮（复制 `ip:端口`，弹 toast 提示） |
+| 本机 IP | 每个网卡 IPv4 **单独一行** `ip:端口`（不换行、过长省略号），每行右侧 `复制` 按钮（复制该行 `ip:端口`，弹 toast） |
 | 主机 IP | 输入框（`kind=4`）+ `加入` 按钮；标题行右侧 `粘贴` 按钮（支持粘贴 `ip:port` 自动拆分）；回车 = 焦点在 IP 框时“加入”，否则“建房” |
-| 房间列表 | 扫描结果（锁标记 + 名称 + 人数 + 版本徽标 + 主机 IP）+ 每行 `复制`（复制该房间 `ip:端口`）与 `加入`；版本不一致标红提示 |
+| 房间列表 | 扫描结果（锁标记 + 名称 + 人数 + 版本徽标 + 主机 IP）+ 每行 `复制`（复制该房间 `ip:端口`）与 `加入`；版本不一致标红提示；**超出面板高度时底部提示还有 N 个房间未显示**（`LanMoreRooms`） |
 | 提示行 | 同网段/防火墙/版本需一致 |
+
+> **2026-09-12（三）UI 修复**（用户回报的三个问题）：
+> 1. **点“复制”没生效** → 剪贴板主路径改成 **Win32 原生**（`Core/Clipboard.cs`：`OpenClipboard`/`GlobalAlloc`/
+>    `SetClipboardData(CF_UNICODETEXT)`，与 IME 的 P/Invoke 同路子），`GUIUtility.systemCopyBuffer` 仅作兜底；
+>    成功/失败都写日志 `[UI] clipboard copy ok=… via=win32|unity`，失败时面板红字提示（`ErrCopyFailed`）。
+> 2. **多网卡时 IP 行被挤出面板** → 不再用 `" / ".Join` 挤一行，**每网卡一行**（`enableWordWrapping=false`
+>    + `Ellipsis`），各带自己的复制按钮。
+> 3. **面板没有动态尺寸** → `Rebuild()` 末尾 `ApplyPanelHeight(y)`：面板高 = 内容实高 + 14（下限 240、
+>    上限 `Screen.height-120`）；房间列表限高 `MaxPanelHeight-64`，超出部分用 `LanMoreRooms` 提示。
 
 文案集中在 `UI/CoopLoc.cs`（zh/en 双语，`TabSteam`/`TabLan`/`LanCreate`/`LanScan`/`LanIpLabel`/`LanPortLabel`/`LanMyIp`/`LanHint`/`LanIdentity`/`LanMismatch` 等）。
 

@@ -49,6 +49,30 @@
 | 自动加入时暂停游戏 | AutoJoin / CoopBehaviour | 加入期间 `RequestGlobalPause`，成功/失败 `ReleaseGlobalPause` | 🔄 待验证 |
 | 补给/征用点显示同步 | RequisitionSync | 弹药/发射药/库存/购买已同步；**征用点 interop 只读**（`req/points` 主机只读广播，客机界面点数不更新） | 🔄 需专门设计（写回 AntiTamper 或客机本地执行购买） |
 
+### UI / ModMenu 右栏（2026-09-13）
+
+| 问题 | 归属 | 分析 | 状态 |
+|---|---|---|---|
+| **右侧块没有固定最大尺寸，把外面的块撑开了** | `src/OpenNestModMenu/UI/UIKitIntegration.cs` | 右栏内容（详情/设置/诊断）直接摊进右栏子流，`Columns` 行高由内容决定（诊断页 50+ 行）→ 整页/窗口被顶高（`page.Size(1180,700)` 只是首选尺寸，拦不住）。修：右栏内容包进固定 470 高的内嵌 `List`（`mm.right`，与左栏同高） | ✅ 已修并实测（`zones` 出现 `mm.right-viewport/mm.right-scrollbar`，窗口仍 1180x700） |
+| **诊断页没有点击复制** | 同上 + 新增 `Core/Clipboard.cs` | 顶部/底部各加一个「复制全部」→ `CopyDiag` 直接读 `UiPageDef.Rows` 拼纯文本进剪贴板（剥 TMP 标签、跳过按钮行、带模组标识与时间戳）。剪贴板走 **Win32 主路径**（`GUIUtility.systemCopyBuffer` 在 IL2CPP 下不可靠） | ✅ 已实测：`Get-Clipboard` 拿到 8 个分组的完整纯文本诊断 |
+| （观察项）切页签后 `zones` 残留一批 `[hidden]` 旧热区 | UIKit 页面重建 | `HitTop` 会跳过（`activeInHierarchy=false`）⇒ 不误点，但反复切页会累积；属页面重建时的热区回收 | 🔄 待处理（低优先） |
+
+### UI / 悬浮聊天层（2026-09-13）
+
+| 问题 | 归属 | 分析 | 状态 |
+|---|---|---|---|
+| **Chat 左侧框没有聊天记录**（列表里有行数却一条看不见） | `UiList.ApplyLayout` + `UiChatOverlay.SetExpanded` | 两处根因：① `ApplyLayout` 里 `SetRect(Content, …, ContentHeight)` 用的是**上一轮** `ContentHeight`，`ClearRows()` 归零后写下去的是 **0 高内容区** → `RectMask2D` 把行整片裁掉；固定尺寸宿主（浮窗宽度不变）下 `MaybeRelayout` 直接 return ⇒ 永不收敛。② `SetExpanded` 把 `sizeDelta.x` 写成**绝对宽** `PanelW-16`，而列表是水平拉伸 anchor ⇒ 实际宽 = 父宽 + 324，居中 pivot 把内容推到面板边界外。修：高度算完后再落定一次；宽度写相对增减 `-16` + 改高后立即 `ApplyLayout()` | ✅ 已修并实机验证（`chat-list rows=6 … 可见行=6#1~#6`，截图 `shots\chat collapsed.png`） |
+| **失去聚焦（收起）态背景不够透明** | `UiChatOverlay` | `_inputBg = _panelBg`（同一个 Image）：`SetExpanded` 末尾那次“输入框色”赋值把面板 alpha 覆盖成不透明（收起态本应 `0.34`）。修：删掉共享，输入框背景由 `UiTextInput` 自管 | ✅ 已修并实测（`面板背景alpha=0.34` 收起 / `0.94` 展开，两张截图） |
+| **Chat 失去焦点后无法与菜单交互；滚动不在最底、滚轮不生效、无法点击** | `UiPointerRouter` + `UiChatOverlay` | ① **真因（滚轮/点击）= 指针路由没开**：`UiPointerRouter.Tick` 首行 `if (!Active) return;`，而 `Activate()` 只在菜单/原生页打开时调 ⇒ 菜单关着时浮窗热区全死。② “点浮窗展开”热区覆盖整块且后登记=优先 ⇒ 抢菜单/列表的点击。③ 展开把视口 160→116（可滚 593.4），偏移仍停在 549.4。④ `Clear()` 只销毁画布、**从不注销热区** ⇒ 反复进出会话累积死热区。修：浮窗存活时 `Tick` 兵底 `Activate()`；`chat-open` 在菜单打开/展开时禁用；改高后 `ScrollBy(MaxFloat)`；`Clear()` 先 `Remove` 再 Destroy | ✅ 已修并实机验证（收起态滚轮 `发给 'chat-list-viewport'` 549.4→423.4；`tap:chat-open`→`展开=True`；展开态 `593.4/593.4`（在底）；菜单打开时 `展开热区=禁用`） |
+| **Chat 聚焦再失焦后菜单组件全部点不动**（用户：“Chat 聚焦在失去聚焦之后就会导致菜单组件都没法接受点击”） | `UiInputGuard`（`_textRc` 泄漏） | **真因**：聚焦打字时临时压住外部 `GraphicRaycaster`（**实测 60 个**），而 `SetTextCapture(false)` / `Restore()` / `EnsureReleasedWhenIdle()` 三处**都没还原它们**，`_textRc` 只增不减 ⇒ 游戏自己的射线器**永久 disabled**，游戏 UI（ESC 菜单/原生菜单）再也接不到点击。修：新增 `RestoreTextRaycasters()` 在三处调用 + 纳入空闲残留判定；探针新增 `聚焦临时压住射线器=N` | ✅ 已修并实测（聚焦后 `60` → 失焦后 `0`） |
+| （复盘）上一轮“穿透拦截无残留”结论**方法不够** | 同上 | 当时只看了 `widgetprobe` 的“游戏输入模块 启用/停用”（那两项本来就正常），没看没被探针覆盖的 `_textRc` ⇒ 误判“不复现”。教训：**探针没覆盖到的东西等于没验证** | ✅ 已补探针并更正结论 |
+
+### 性能 / 帧率
+
+| 问题 | 归属 | 分析 | 状态 |
+|---|---|---|---|
+| **创建 Steam 大厅后主机掉到个位数 FPS**（间歇性；本地模式不掉；菜单关掉仍卡；只报主机） | `NetManager` / `SteamLobby` / `UIKitIntegration` | 2026-09-13 定位：`frame.log` 实测 `Steam.Probe` 8–14 ms/s（每帧 2 次 Steam IPC）、`ControlSync` 35–39 ms/s、菜单整页重建；静态复核排除了每帧重注册/自播/每帧 `SetLobbyData`/`BlockerSync`（3s 缓存）。已落 3 处修复：① `SteamLobby.HostSteamId` 由“每次读都调 `GetLobbyOwner`”改为缓存（进/退房 + 房主变更时失效）；② 联机菜单刷新改 **0.6s 节流 + 状态指纹去重 + 非当前页跳过**；③ `Steam.Probe` 降频 2Hz。**修后复跑未复现**：稳态 `fps=105–109 avg=9.2ms worst=19ms`，`Steam.Probe`/`UiKitRefresh` 均掉出榜单（<2.47 ms/s） | 🔄 已修，2026-09-13 复跑未复现；待长时间使用确认（诊断手法见 `docs/FRAME_DIAG.md` §三.5） |
+
 ### 自定义任务（CSM）— 结算 / 床交互（2026-08-30 调试归档）
 
 > **结论**：自定义任务完成后的**原生结算/床交互仍未打通**（用户判定"还是不行"后归档停止）。
@@ -92,7 +116,7 @@
 - ✅ 多人失焦暂停：patch `PauseManager.OnApplicationFocus` + `PauseOnFocusLoss=false` + `runInBackground=true`
 
 ### T2 — 地图桌 / 标记 / Token
-- ✅ **铁巢（TurretController）位置同步**（v0.2.0）：主机权威 patch `MoveTurret`/`SetTurretLocation`（MsgType=146，对齐 Synchrony NestMoveBridge）——铁巢坐标两端一致 → 追踪器轨迹 / 炮弹落点 / 打字机 `[GRID <turret>]` 一致。→ `docs/INTERACTABLES.md`
+- ✅ **铁巢（TurretController）位置同步**（v0.2.0）：主机权威 patch `MoveTurret`/`SetTurretLocation`（MsgType=146，对齐 官方联机 NestMoveBridge）——铁巢坐标两端一致 → 追踪器轨迹 / 炮弹落点 / 打字机 `[GRID <turret>]` 一致。→ `docs/INTERACTABLES.md`
 - ✅ **追踪器（Map Table_ Shell Trajectory display）**（v0.2.0）：铁巢位置同步后本地轨迹自然一致，移除独立 144 同步（TrajectoryDisplaySync）
 - ✅ **铁巢 Token 开局错位**（v0.2.0）：铁巢 token 是可拖拽标记需同步，但开局 forceFull 全量跳过（游戏摆位两端同 seed 天然一致），只有玩家拖拽才广播——不再把"未摆位/摆位中"位置广播覆盖对端开局状态
 - ✅ MapToken 拖动 / T/F/S1-10 / 位置同步（编号+路径组合区分同名、首全量对齐+变化广播）

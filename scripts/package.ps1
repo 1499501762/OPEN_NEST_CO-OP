@@ -1,16 +1,18 @@
 ﻿# ============================================================
 # Open Nest Co-op 打包脚本
-# 本地打包四个版本到 release/：
+# 本地打包到 release/（联机模组 4 个 + 模组菜单 2 个）：
 #   1. OpenNestCoop-<ver>-BepInEx-Mod.zip           (BepInEx 光 MOD: dll + LiteNetLib)
 #   2. OpenNestCoop-<ver>-MelonLoader-Mod.zip       (MelonLoader 光 MOD: dll + LiteNetLib)
 #   3. OpenNestCoop-<ver>-BepInEx-Standalone.zip    (BepInEx 6 加载器 + MOD + 依赖)
 #   4. OpenNestCoop-<ver>-MelonLoader-Standalone.zip(MelonLoader 加载器 + MOD + 依赖)
+#   5. OpenNestModMenu-<ver>-BepInEx.zip            (模组菜单，BepInEx 版：plugins\ 两个 dll)
+#   6. OpenNestModMenu-<ver>-MelonLoader.zip        (模组菜单，MLL 版：Mods\ + UserLibs\)
 # 用法: powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
 # ============================================================
 param(
     [string]$GameDirG,
     [string]$GameDirD,
-    [string]$Version = "0.2.1-Alpha-2",
+    [string]$Version = "0.2.1-Alpha-3",
     # 全新加载器源（Standalone 用，不用本地 G/D 环境；MLL 与 BepInEx 完全分开打包）
     # ⚠️ BepInEx 必须用 6.0.0-be.785（Bleeding Edge build 785，builds.bepinex.dev/projects/bepinex_be/785）
     [string]$BepInEx6Zip = "",
@@ -29,8 +31,8 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 # 显式传参优先，未传时用 env 常量（点源后 env.ps1 的赋值覆盖同名 param 默认 ""），env 也没有才回退硬编码默认。
 $envFile = Join-Path $PSScriptRoot "env.ps1"
 if (Test-Path $envFile) { . $envFile }
-if (-not $GameDirG) { $GameDirG = if ($GameDir) { $GameDir } else { "G:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator" } }
-if (-not $GameDirD) { $GameDirD = if ($ClientGame) { $ClientGame } else { "D:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator" } }
+if (-not $GameDirG) { $GameDirG = if ($GameDir) { $GameDir } else { "C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator" } }
+if (-not $GameDirD) { $GameDirD = if ($ClientGame) { $ClientGame } else { "C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator" } }
 if (-not $BepInEx6Zip) { $BepInEx6Zip = "$env:USERPROFILE\Downloads\BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785.zip" }
 if (-not $MLLZip) { $MLLZip = "$env:USERPROFILE\Downloads\MelonLoader.x64.0.7.3.zip" }
 
@@ -199,7 +201,74 @@ Remove-Item (Join-Path $p4 "MelonLoader\Latest.log") -Force -ErrorAction Silentl
 Set-Content -Path (Join-Path $p4 "README.txt") -Value $readmeStandalone -Encoding UTF8
 New-Package "OpenNestCoop-$Version-MelonLoader-Standalone" $p4
 
-# ---------- 7. 清理 ----------
-Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+# ---------- 7. 包 5/6：OpenNestModMenu（独立模组菜单）双端光 MOD ----------
+#  与联机模组**完全独立**：两个包只装菜单本体 + 契约 dll（BepInEx: plugins\；MLL: Mods\ + UserLibs\）。
+Write-Host "== 构建 OpenNestModMenu（双端） =="
+dotnet build "src\OpenNestModMenu\OpenNestModMenu.csproj" -c Release 2>&1 | Select-Object -Last 1
+dotnet build "src\OpenNestModMenu.MelonMod\OpenNestModMenu.MelonMod.csproj" -c Release 2>&1 | Select-Object -Last 1
+
+$mmVer = "0.1.0"
+$mmVerMatch = Select-String -Path "src\OpenNestModMenu\ModMenuInfo.cs" -Pattern 'Version = "([^"]+)"'
+if ($mmVerMatch) { $mmVer = $mmVerMatch.Matches[0].Groups[1].Value }
+$mmBepBin = Join-Path $Root "src\OpenNestModMenu\bin\Release\net6.0"
+$mmMlBin  = Join-Path $Root "src\OpenNestModMenu.MelonMod\bin\Release\net6.0"
+
+$readmeModMenu = @"
+Open Nest Mod Menu v$mmVer - Mod Only Package / 光 MOD 包
+=========================================================
+In-game mod menu: mod list + enable/disable + unified settings + load order + diagnostics.
+游戏内模组菜单：模组列表 + 启停 + 统一设置中心 + 统一加载顺序 + 诊断面板。
+
+--- 中文 ---
+【安装 - BepInEx 版】
+1. 需已安装 BepInEx 6 (IL2CPP) 并运行过一次游戏。
+2. 解压本包，把 BepInEx\plugins\ 下两个 dll 复制到 <游戏目录>\BepInEx\plugins\
+3. 进游戏按 F6 开关菜单（右上角“详情/设置/诊断”三个页签）。
+
+【安装 - MelonLoader 版】
+1. 需已安装 MelonLoader。
+2. 把 Mods\OpenNestModMenu.MelonMod.dll 复制到 <游戏目录>\Mods\，
+   UserLibs\OpenNestModMenu.API.dll 复制到 <游戏目录>\UserLibs\
+3. 进游戏按 F6 开关菜单。
+
+【用法】F6 开关菜单；左栏选模组 → 右栏“详情/设置/诊断”；ESC 关菜单（菜单打开期间游戏自己的 ESC 菜单会被拦住）。
+【配置】<游戏目录>\BepInEx\config\OpenNestModMenu.cfg（MLL 侧 = UserData\）、语言键 .lang.ini、顺序表 .order.ini。
+【日志】<游戏目录>\OpenNestModMenuLogs\{modmenu,loader}.log
+【第三方接入】引用 OpenNestModMenu.API.dll 实现 IModMenuProvider（见 docs/API.md）。
+
+--- English ---
+[Install - BepInEx build]
+1. Requires BepInEx 6 (IL2CPP), game launched once.
+2. Extract; copy the two dlls under BepInEx\plugins\ to <GameDir>\BepInEx\plugins\
+3. Press F6 in game.
+
+[Install - MelonLoader build]
+1. Requires MelonLoader.
+2. Copy Mods\OpenNestModMenu.MelonMod.dll to <GameDir>\Mods\ and UserLibs\OpenNestModMenu.API.dll to <GameDir>\UserLibs\
+3. Press F6 in game.
+
+[Usage] F6 toggles the menu; ESC closes it (the game's own ESC menu is blocked while open).
+[Config] <GameDir>\BepInEx\config\OpenNestModMenu.cfg (MLL: UserData\), language keys .lang.ini, load order .order.ini
+[Logs] <GameDir>\OpenNestModMenuLogs\{modmenu,loader}.log
+[Third-party] Reference OpenNestModMenu.API.dll and implement IModMenuProvider (see docs/API.md).
+"@
+
+$p5 = Join-Path $stage "OpenNestModMenu-$mmVer-BepInEx"
+New-Item -ItemType Directory -Path $p5 -Force | Out-Null
+Copy-Into $p5 (Join-Path $mmBepBin "OpenNestModMenu.dll")     "BepInEx\plugins\OpenNestModMenu.dll"
+Copy-Into $p5 (Join-Path $mmBepBin "OpenNestModMenu.API.dll") "BepInEx\plugins\OpenNestModMenu.API.dll"
+Set-Content -Path (Join-Path $p5 "README.txt") -Value $readmeModMenu -Encoding UTF8
+New-Package "OpenNestModMenu-$mmVer-BepInEx" $p5
+
+$p6 = Join-Path $stage "OpenNestModMenu-$mmVer-MelonLoader"
+New-Item -ItemType Directory -Path $p6 -Force | Out-Null
+Copy-Into $p6 (Join-Path $mmMlBin "OpenNestModMenu.MelonMod.dll") "Mods\OpenNestModMenu.MelonMod.dll"
+Copy-Into $p6 (Join-Path $mmMlBin "OpenNestModMenu.API.dll")      "UserLibs\OpenNestModMenu.API.dll"
+Set-Content -Path (Join-Path $p6 "README.txt") -Value $readmeModMenu -Encoding UTF8
+New-Package "OpenNestModMenu-$mmVer-MelonLoader" $p6
+
+# ---------- 8. 清理 ----------
+
+# ---------- 7. 清理 ----------Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "== 打包完成 =="
 Get-ChildItem $OutDir -Filter "*.zip" | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}

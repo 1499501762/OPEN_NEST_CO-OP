@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestModMenu</AssemblyName>
+    <RootNamespace>OpenNestModMenu</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.0.3</Version>
+    <!--
+      OpenNestModMenu —— 独立模组（BepInEx 版）。
+      ⚠️ 与 OpenNestCoop / OpenNestCore **相互独立**：不链接、不引用它们的任何源码或程序集。
+      仅有的源码复用是 Vendor/ 下"拷进来 + 改独立命名空间"的 UI/日志基建（见 Vendor/README.md）。
+      设计文档：docs/MOD_MENU.md
+    -->
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader 入口壳仅 ML 版编译（本工程用 BepInEx 壳 Plugin.cs） -->
+    <Compile Remove="MelonModEntry.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 契约程序集（第三方 API）；随插件一起部署（BepInEx\plugins\OpenNestModMenu.API.dll） -->
+    <ProjectReference Include="..\OpenNestModMenu.API\OpenNestModMenu.API.csproj" />
+    <!--
+      OpenNestUIKit 的**契约**（可选依赖，2026-09-13）：
+      · Private=false → **不**把 OpenNestUIKit.API.dll 拷进 plugins（它只随 UIKit 一起装）；
+      · 运行时全部走反射探测 + `[MethodImpl(NoInlining)]` 隔离（见 UI/UIKitIntegration.cs）→
+        没装 UIKit 时本模组完全不受影响，界面回退到自带覆盖 UI。
+    -->
+    <ProjectReference Include="..\OpenNestUIKit.API\OpenNestUIKit.API.csproj" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 6 IL2CPP 运行时（游戏内提供，不复制） -->
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <!-- Unity（interop，不复制） -->
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BepInExDir)\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(BepInExDir)\interop\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(BepInExDir)\interop\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(BepInExDir)\interop\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(BepInExDir)\interop\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(BepInExDir)\interop\Unity.TextMeshPro.dll" Private="false" />
+    <!-- 新 Input System（热键轮询；旧版 UnityEngine.Input 在该游戏被禁用） -->
+    <Reference Include="Unity.InputSystem" HintPath="$(BepInExDir)\interop\Unity.InputSystem.dll" Private="false" />
+    <!-- Il2Cpp 系统程序集（互操作基类定义，不复制） -->
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(BepInExDir)\interop\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(BepInExDir)\interop\Il2CppSystem.Core.dll" Private="false" />
+    <!-- 游戏程序集（interop；仅"游戏侧桥接"用，Vendor 基线代码不得引用它） -->
+    <Reference Include="Assembly-CSharp" HintPath="$(BepInExDir)\interop\Assembly-CSharp.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- 构建后部署到 BepInEx 插件目录：dotnet build -p:DeployToGame=true -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)OpenNestModMenu.dll" />
+      <_DeployFiles Include="$(TargetDir)OpenNestModMenu.API.dll" />
+      <_DeployFiles Include="$(TargetDir)OpenNestModMenu.pdb" Condition="Exists('$(TargetDir)OpenNestModMenu.pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFolder="$(BepInExDir)\plugins\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed OpenNestModMenu to $(BepInExDir)\plugins\" />
+  </Target>
+
+</Project>

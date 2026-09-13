@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestUIKit</AssemblyName>
+    <RootNamespace>OpenNestUIKit</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.0.1-Alpha-4</Version>
+    <!--
+      OpenNestUIKit —— 原生 UI 库模组（BepInEx 版）。
+      ⚠️ 与 OpenNestCoop / OpenNestCore / OpenNestModMenu **程序集级独立**：不引用它们的任何程序集，
+      只做"源码拷贝 + 改独立命名空间"复用（Vendor/ 目录，见 Vendor/README.md 与 docs/UI_KIT.md §二）。
+      设计文档：docs/UI_KIT.md
+    -->
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader 入口壳仅 ML 版编译（本工程用 BepInEx 壳 Plugin.cs） -->
+    <Compile Remove="MelonModEntry.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 契约程序集（第三方 API）；随插件一起部署（BepInEx\plugins\OpenNestUIKit.API.dll） -->
+    <ProjectReference Include="..\OpenNestUIKit.API\OpenNestUIKit.API.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 6 IL2CPP 运行时（游戏内提供，不复制） -->
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <!-- Unity（interop，不复制） -->
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BepInExDir)\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(BepInExDir)\interop\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(BepInExDir)\interop\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(BepInExDir)\interop\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(BepInExDir)\interop\Unity.TextMeshPro.dll" Private="false" />
+    <!-- 新 Input System（指针/键盘轮询；旧版 UnityEngine.Input 在该游戏被禁用） -->
+    <Reference Include="Unity.InputSystem" HintPath="$(BepInExDir)\interop\Unity.InputSystem.dll" Private="false" />
+    <!-- Il2Cpp 系统程序集（互操作基类定义，不复制） -->
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(BepInExDir)\interop\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(BepInExDir)\interop\Il2CppSystem.Core.dll" Private="false" />
+    <!-- 游戏程序集（interop；仅 Native/UiGameBridge 等"游戏侧桥接"用，Vendor 基线代码不得引用它） -->
+    <Reference Include="Assembly-CSharp" HintPath="$(BepInExDir)\interop\Assembly-CSharp.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- 构建后部署到 BepInEx 插件目录：dotnet build -p:DeployToGame=true -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)OpenNestUIKit.dll" />
+      <_DeployFiles Include="$(TargetDir)OpenNestUIKit.API.dll" />
+      <_DeployFiles Include="$(TargetDir)OpenNestUIKit.pdb" Condition="Exists('$(TargetDir)OpenNestUIKit.pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFolder="$(BepInExDir)\plugins\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed OpenNestUIKit to $(BepInExDir)\plugins\" />
+  </Target>
+
+</Project>

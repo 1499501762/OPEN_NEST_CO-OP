@@ -24,7 +24,7 @@
 与配置文件 `OpenNestCoop.cfg` **同目录**（路径直接取自 `CoopConfig.FilePath` 的目录）。
 
 ```ini
-## Open Nest Co-op v0.2.1-Alpha-2 language file / 语言键文件
+## Open Nest Co-op v0.2.1-Alpha-3 language file / 语言键文件
 ## 本文件是界面文案的**来源**：改这里即可改文案（约 2 秒热重载，不用重启）。
 ## 格式：[语言代码] 段 + `键 = 文本`；# 或 ; 开头是注释；{0} {1} 是运行期占位符。
 ## 新增语言：自己加一段（如 [ja]），缺键的项会自动回退到 [en] → 内置默认值。

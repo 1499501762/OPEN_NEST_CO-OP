@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestUIKit.Test.MelonMod</AssemblyName>
+    <RootNamespace>OpenNestUIKit.Test</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.0.1-Alpha-4</Version>
+    <!-- OpenNestUIKit.Test —— 测试模组（MelonLoader 版）：与 BepInEx 版共用同一份源码，只换入口壳。 -->
+    <DefineConstants>$(DefineConstants);MELONLOADER</DefineConstants>
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <ClientGame Condition="'$(ClientGame)'==''">C:\Iron Nest Heavy Turret Simulator</ClientGame>
+    <MLBase>$(ClientGame)</MLBase>
+    <MLCore>$(ClientGame)\MelonLoader\net6</MLCore>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\OpenNestUIKit.Test\**\*.cs"
+             Exclude="..\OpenNestUIKit.Test\obj\**;..\OpenNestUIKit.Test\bin\**;..\OpenNestUIKit.Test\TestPlugin.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 契约（API）+ UIKit 的 ML 版主体（同为 MLL interop 编译目标） -->
+    <ProjectReference Include="..\OpenNestUIKit.API\OpenNestUIKit.API.csproj" />
+    <ProjectReference Include="..\OpenNestUIKit.MelonMod\OpenNestUIKit.MelonMod.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader" HintPath="$(MLCore)\MelonLoader.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(MLCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(GameDir)\BepInEx\core\0Harmony.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="Unity.InputSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Unity.InputSystem.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.Core.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll" Private="false" />
+  </ItemGroup>
+
+  <Target Name="DeployToMods" AfterTargets="Build" Condition="'$(DeployToMods)' == 'true'">
+    <ItemGroup>
+      <_ModFiles Include="$(TargetDir)OpenNestUIKit.Test.MelonMod.dll" />
+      <_ModFiles Include="$(TargetDir)OpenNestUIKit.Test.MelonMod.pdb" Condition="Exists('$(TargetDir)OpenNestUIKit.Test.MelonMod.pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ModFiles)" DestinationFolder="$(MLBase)\Mods\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed OpenNestUIKit.Test (MLL) to $(MLBase)\Mods\" />
+  </Target>
+
+</Project>

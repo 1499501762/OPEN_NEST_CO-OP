@@ -269,7 +269,7 @@ ImpactLocation.EvaluateAndReport n=1,2
 - 相关游戏资产线索（`tools/find_prefab.py` / `list_go.py` / `dump_prefab.py`）：`SaftySwitch delete recon photos`
   （删除侦察照片的保险开关）、`resources.assets` 的 `Photo Overlay`、`sharedassets0.assets` 的
   `FMOD new photo SFX tm_map_reveal`（"new photo" 音效）。
-- 参考实现：`ref/decompiled/Synchrony/Synchrony/ImpactPhotoBearingBridge.cs`（patch `RandomUIRotation.Awake`
+- 参考实现：官方联机的反编译参考 `ImpactPhotoBearingBridge.cs`（patch `RandomUIRotation.Awake`
   + 按着弹格匹配主机四元数 + 12×0.1s 反复写 `localRotation`）与 `ReconArtifactBridge.cs`（传 PNG 纹理块）。
 
 **修法（`ImpactSync`，MsgType=13）**：角度不再各自随机，改为**由已同步的着弹点 (x,y) 算出的确定性值**

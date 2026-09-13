@@ -54,6 +54,18 @@ public static class CoopRuntime
         OpenNestCoop.Core.Loc.LocFile.Init();
         UI.CoopLoc.Refresh();
 
+        // 排障自检开关（--copytest）：写一次系统剪贴板并回读，日志打印走的通道（验证 Win32 剪贴板可用）
+        if (OpenNestCoop.Net.AutoJoin.WantCopyTest)
+        {
+            try
+            {
+                bool ok = Clipboard.SetText("OpenNestCoop clipboard self-test");
+                string back = Clipboard.GetText();
+                LogSource?.Info($"[Clipboard] self-test set={ok} via={Clipboard.LastPath} readback='{back}'");
+            }
+            catch (System.Exception ex) { LogSource?.LogWarning($"[Clipboard] self-test failed: {ex.Message}"); }
+        }
+
         // 独立文件日志：诊断/联机日志 → frame/net/sync 独立 .log（主日志安静 → 控制台不刷屏 → 帧性能提升）
         InitFileLogs();
 

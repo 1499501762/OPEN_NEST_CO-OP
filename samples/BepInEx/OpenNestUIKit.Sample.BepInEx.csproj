@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestUIKit.Sample.BepInEx</AssemblyName>
+    <RootNamespace>OpenNestUIKit.Sample.BepInEx</RootNamespace>
+    <Version>1.0.0</Version>
+    <!--
+      Sample third-party mod (BepInEx shell) — see ..\README.md and ..\..\docs\API.md.
+      It references ONLY the contract assembly (OpenNestUIKit.API), never the mod itself.
+      Point -p:GameDir at a game that has BepInEx 6 (IL2CPP) installed.
+    -->
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+
+  <!-- The provider is loader-independent: both shells compile the same shared sources. -->
+  <ItemGroup>
+    <Compile Include="..\Shared\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Contract assembly. Private="false" on purpose: Open Nest UIKit ships this dll, so the
+         sample must NOT drop a second copy into plugins/. -->
+    <ProjectReference Include="..\..\src\OpenNestUIKit.API\OpenNestUIKit.API.csproj" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 6 IL2CPP runtime (provided by the loader, not copied) -->
+    <Reference Include="BepInEx.Core" HintPath="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Copy the sample into the game: dotnet build -c Release -p:DeployToGame=true -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(DeployToGame)' == 'true'">
+    <ItemGroup>
+      <_DeployFiles Include="$(TargetDir)$(AssemblyName).dll" />
+      <_DeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFolder="$(BepInExDir)\plugins\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed $(AssemblyName) to $(BepInExDir)\plugins\" />
+  </Target>
+
+</Project>

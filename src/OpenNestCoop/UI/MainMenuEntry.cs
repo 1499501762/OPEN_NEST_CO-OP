@@ -133,18 +133,42 @@ public static class MainMenuEntry
                 applyCount++;
             }
             // 2) 全场景所有 ESC Menu Buttons 容器顶部注入（Barbet 主菜单 + Main Camera 暂停菜单，多实例）
+            //    ⚠️ 环境里有 OpenNestUIKit 时**不自己做**：ESC 入口由 UIKit 统一注入（用户要求：注入归 UIKit 一家做，
+            //       免得两个模组各自往原生容器里塞按钮、各自重排、互相打架）。
             int escCount = 0;
-            var allTf = UnityEngine.Object.FindObjectsOfType<Transform>(true);
-            foreach (var t in allTf)
+            if (UIKitIntegration.EscEntryOwnedByUIKit)
             {
-                if (t == null || t.name != "ESC Menu Buttons") continue;
-                if (HasEntryChild(t)) continue; // 已注入过
-                InjectEscEntry(t);
-                escCount++;
+                CoopLog.Info("MainMenuEntry", () => "ESC 入口已交给 OpenNestUIKit 注入 → 本模组跳过 ESC 注入");
+            }
+            else
+            {
+                var allTf = UnityEngine.Object.FindObjectsOfType<Transform>(true);
+                foreach (var t in allTf)
+                {
+                    if (t == null || t.name != "ESC Menu Buttons") continue;
+                    if (HasEntryChild(t)) continue; // 已注入过
+                    InjectEscEntry(t);
+                    escCount++;
+                }
             }
             CoopLog.Info("MainMenuEntry", () => $"注入完成: Apply 右侧 {applyCount} 处, ESC 菜单 {escCount} 个");
         }
         catch (Exception ex) { CoopLog.Warn("MainMenuEntry", () => $"create entry: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// 入口点击 → 打开联机菜单。
+    /// 环境里有 OpenNestUIKit → 打开**它**的联机页（菜单由 UIKit 渲染，用户要求：菜单 UI 统一走 UIKit）；
+    /// 没有 UIKit（或它还没就绪）→ 回退本模组自带的大厅窗口。
+    /// </summary>
+    private static void OpenCoopMenu()
+    {
+        try
+        {
+            if (UIKitIntegration.TryToggleInUIKit()) return;
+            CoopUIManager.ToggleMenu();
+        }
+        catch (Exception ex) { CoopLog.Warn("MainMenuEntry", () => $"OpenCoopMenu: {ex.Message}"); }
     }
 
     /// <summary>父容器下是否已有联机入口（防重复注入）。</summary>
@@ -212,15 +236,24 @@ public static class MainMenuEntry
             rt.sizeDelta = new Vector2(250f, 40f);       // ESC 按钮尺寸
             go.SetActive(true);
 
-            var img = go.AddComponent<Image>();
-            img.color = new Color(0.16f, 0.20f, 0.26f, 0.96f);
+            // ⚠ 2026-09-13（用户：“Settings 里面右下角还有一个 CoopMenu 的注入，这个注入现在也有白色叠层的问题”）：
+            //   模板根节点**没有** Graphic 时（本游戏原生按钮就是：底图在子物体 `Bg` 上），我们**不要**自己再挂一张白底图
+            //   —— 那层原生没有，看起来就是“白色叠了个框”。这时底图/点击目标都由镜像出来的那层负责（见 CopyTintLikeNative）。
+            bool tplRootGraphic = false;
+            try { tplRootGraphic = template != null && template.GetComponent<Graphic>() != null; } catch { }
+            Image img = null;
+            if (tplRootGraphic || template == null)
+            {
+                img = go.AddComponent<Image>();
+                img.color = new Color(0.16f, 0.20f, 0.26f, 0.96f);
+            }
             var btn = go.AddComponent<Button>();
-            btn.onClick.AddListener(new Action(() => { try { CoopUIManager.ToggleMenu(); } catch { } }));
+            btn.onClick.AddListener(new Action(OpenCoopMenu));
 
-            // 抄模板主按钮 Image（跳过阴影）
-            UnityEngine.UI.Image tImg = null;
+            // 抄模板主按钮 Image（跳过阴影）——**仅当我们自己有根底图时**
             try
             {
+                UnityEngine.UI.Image tImg = null;
                 var imgs = template.GetComponentsInChildren<UnityEngine.UI.Image>(true);
                 foreach (var im in imgs)
                 {
@@ -229,16 +262,20 @@ public static class MainMenuEntry
                     var sn = im.sprite != null ? im.sprite.name : "";
                     if (sn.IndexOf("Shadow", StringComparison.OrdinalIgnoreCase) < 0) { tImg = im; break; }
                 }
-                if (tImg != null && tImg.sprite != null)
+                if (img != null && tImg != null && tImg.sprite != null)
                 {
                     img.sprite = tImg.sprite; img.type = tImg.type; img.color = tImg.color;
                     try { img.pixelsPerUnitMultiplier = tImg.pixelsPerUnitMultiplier; img.fillCenter = tImg.fillCenter; } catch { }
                 }
-                CoopLog.Debug("MainMenuEntry", () => $"ESC 模板 '{template.name}' sprite={(tImg != null && tImg.sprite != null ? tImg.sprite.name : "null")} btnScale={template.transform.localScale} rootScale={esc.transform.root.localScale}");
+                CoopLog.Debug("MainMenuEntry", () => $"ESC 模板 '{template.name}' 根底图={tplRootGraphic} sprite={(tImg != null && tImg.sprite != null ? tImg.sprite.name : "null")} btnScale={template.transform.localScale} rootScale={esc.transform.root.localScale}");
             }
             catch { }
-            try { btn.transition = template.transition; btn.colors = template.colors; } catch { }
-
+            // 抄模板 Button 过渡（悬停/点击变色）——
+            // ⚠️ 2026-09-13 改为**颜色原样照抄**（用户要求：“颜色改为抄颜色而不是瞎改成白的”）：
+            //    以前发现原生 `normalColor` 是纯黑，就把整块颜色换成白底 tint 了事 → 底色跟原生不一样。
+            //    正确做法：`colors`/`transition` 照抄，并像原生那样把 tint 打到**子节点**上（见 CopyTintLikeNative），
+            //    自己身上的底图**不吃 tint** → 静止时与原生纸面一模一样，悬停也还有原生那点反馈。
+            CopyTintLikeNative(template, btn, img);
             // 文字（抄模板字体/字号/颜色——与"设置"按钮完全一致）。
             // ⚠️ 模板字体优先：ApplySharedFont 会用本地化字体覆盖 font，若与模板字体不同则字形/大小不一致。
             // 只有模板字体不可用（null）才走本地化字体兜底。
@@ -379,35 +416,46 @@ public static class MainMenuEntry
             rt.anchoredPosition = new Vector2(targetX, targetY);
             rt.sizeDelta = size;
 
-            var img = go.AddComponent<Image>();
-            img.color = new Color(0.16f, 0.20f, 0.26f, 0.96f);
-            var btn = go.AddComponent<Button>();
-            btn.onClick.AddListener(new Action(() => { try { CoopUIManager.ToggleMenu(); } catch { } }));
-
-            // 抄模板主按钮 Image（跳过阴影 SUGShadowLite，找不到用第一个）
-            try
+            // ⚠ 2026-09-13（用户：“Settings 里面右下角还有一个 CoopMenu 的注入，这个注入现在也有白色叠层的问题”）：
+            //   模板根节点**没有** Graphic 时（本游戏原生按钮就是：底图在子物体 `Bg` 上）**不要**自建根底图
+            //   —— 那层原生没有，看起来就是“白色叠了个框”；这时的底图/点击目标都由镜像出来的那层负责。
+            bool tplRootGraphic = false;
+            try { tplRootGraphic = template.GetComponent<Graphic>() != null; } catch { }
+            Image img = null;
+            if (tplRootGraphic)
             {
-                UnityEngine.UI.Image tImg = null;
-                var imgs = template.GetComponentsInChildren<UnityEngine.UI.Image>(true);
-                foreach (var im in imgs)
+                img = go.AddComponent<Image>();
+                img.color = new Color(0.16f, 0.20f, 0.26f, 0.96f);
+                // 抄模板主按钮 Image（跳过阴影 SUGShadowLite，找不到用第一个）
+                try
                 {
-                    if (im == null) continue;
-                    if (tImg == null) tImg = im;
-                    var sn = im.sprite != null ? im.sprite.name : "";
-                    if (sn.IndexOf("Shadow", StringComparison.OrdinalIgnoreCase) < 0) { tImg = im; break; }
+                    UnityEngine.UI.Image tImg = null;
+                    var imgs = template.GetComponentsInChildren<UnityEngine.UI.Image>(true);
+                    foreach (var im in imgs)
+                    {
+                        if (im == null) continue;
+                        if (tImg == null) tImg = im;
+                        var sn = im.sprite != null ? im.sprite.name : "";
+                        if (sn.IndexOf("Shadow", StringComparison.OrdinalIgnoreCase) < 0) { tImg = im; break; }
+                    }
+                    if (tImg != null && tImg.sprite != null)
+                    {
+                        img.sprite = tImg.sprite;
+                        img.type = tImg.type;
+                        img.color = tImg.color;
+                        try { img.pixelsPerUnitMultiplier = tImg.pixelsPerUnitMultiplier; img.fillCenter = tImg.fillCenter; } catch { }
+                        CoopLog.Debug("MainMenuEntry", () => $"  模板 '{template.name}' 主sprite={tImg.sprite.name} mppu={tImg.pixelsPerUnitMultiplier} type={tImg.type}");
+                    }
                 }
-                if (tImg != null && tImg.sprite != null)
-                {
-                    img.sprite = tImg.sprite;
-                    img.type = tImg.type;
-                    img.color = tImg.color;
-                    try { img.pixelsPerUnitMultiplier = tImg.pixelsPerUnitMultiplier; img.fillCenter = tImg.fillCenter; } catch { }
-                    CoopLog.Debug("MainMenuEntry", () => $"  模板 '{template.name}' 主sprite={tImg.sprite.name} mppu={tImg.pixelsPerUnitMultiplier} type={tImg.type}");
-                }
+                catch { }
             }
-            catch { }
-            // 抄模板 Button 过渡（悬停/点击变色）
-            try { btn.transition = template.transition; btn.colors = template.colors; } catch { }
+            var btn = go.AddComponent<Button>();
+            btn.onClick.AddListener(new Action(OpenCoopMenu));
+
+            // 抄模板 Button 过渡（悬停/点击变色）—— 颜色原样照抄 + 只镜像原生那**一层**可见底图
+            // （用户：“颜色正常了，不需要兜底换色，原生只有一种背景”；模板根没底图时我们也不自建）
+            Image bgMade = CopyTintLikeNative(template, btn, img);
+            _ = bgMade;
 
             // 文字（抄模板字体/字号/颜色）
             var txtGo = new GameObject("Text");
@@ -508,5 +556,101 @@ public static class MainMenuEntry
         }
         catch { }
         return null;
+    }
+
+    /// <summary>
+    /// 照抄模板按钮的过渡（悬停/点击变色）：**颜色原样抄，不改白**，并像原生那样只镜像**一层**可见底图。
+    ///
+    /// 背景（2026-09-13）：原生按钮的 `colors.normalColor` 是**纯黑**，且 tint 目标是一个**子物体** `Bg`；
+    /// 原生模板根节点**没有底图**（玩家看到的就是 `Bg` 这一层）。
+    /// 我们如果自己再给根挂一张白底图，就多出一层原生没有的“白色叠层”（用户报过两次：ESC 行、Settings 里的 CoopMenu）。
+    /// ⇒ 本方法负责：① `colors`/`transition` 原样照抄；② 镜像**最上面那层启用中的非阴影子底图**，
+    ///  且在“我们自己没有根底图”时把它当**点击射线目标**（否则按钮点不了）。
+    ///
+    /// 返回：我们实际使用的底图（可能是调用方自己的 `img`，也可能是镜像出来的那一层）。
+    /// 与 `OpenNestUIKit.Native.NativeMenuStyler.CopyTint` 同口径（此处不引用 UIKit 程序集：本模组要能单独跑）。
+    /// </summary>
+    private static Image CopyTintLikeNative(Button template, Button btn, Image img)
+    {
+        if (btn == null || template == null) return img;
+        try { btn.transition = template.transition; } catch { }
+        try { btn.colors = template.colors; } catch { }
+        try
+        {
+            var tTg = template.targetGraphic;
+            if (tTg == null) { btn.targetGraphic = img; return img; }                       // 原生没 tint 目标 → 保持我们的
+            if (tTg.transform == template.transform) { btn.targetGraphic = img; return img; }  // 原生就打在自身底图上 → 照做
+
+            // 只镜像**最上面那层**启用中的非阴影子底图（= 玩家真正看到的那层）
+            Image top = null;
+            var srcs = template.GetComponentsInChildren<Image>(true);
+            for (int i = 0; srcs != null && i < srcs.Length; i++)
+            {
+                var s = srcs[i];
+                if (s == null) continue;
+                if (s.transform == template.transform) continue;
+                if (!s.enabled) continue;
+                try { if (!s.gameObject.activeSelf) continue; } catch { }
+                string sn = ""; try { sn = s.sprite != null ? s.sprite.name : ""; } catch { }
+                if (sn.IndexOf("Shadow", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                top = s;
+            }
+            if (top == null) { btn.targetGraphic = img; return img; }
+
+            bool weHaveRoot = img != null;
+            var made = MirrorImage(top, btn.transform, raycast: !weHaveRoot);
+            try
+            {
+                // ⚠ 2026-09-13 修正（用户：“Settings 右下角 Coop Menu 变成白色背景了”）：
+                //   上一版在“我们自己没有根底图”时把 `targetGraphic` 设成了 **null**（想的是“别把抄来的颜色落到镜像层上”），
+                //   结果**tint 没生效** → 镜像出来的 `Bg` 保持白色（`Graphic.color`），而原生那一层是被
+                //   ColorTint 染黑的 → 我们比原生白了一大截。
+                //   与 UIKit 侧 `NativeMenuStyler.CopyTint` 同口径：**模板的 tint 目标是谁，就把我们的 targetGraphic 指到镜像出的那一层**。
+                if (tTg is Image && ReferenceEquals(top, (Image)tTg)) btn.targetGraphic = made;
+                else if (!weHaveRoot) btn.targetGraphic = made;      // 我们只有这一层底图 → 它就是 tint 目标（与原生同构）
+                else btn.targetGraphic = img;
+            }
+            catch { }
+            CoopLog.Debug("MainMenuEntry", () => $"底图照抄原生单层：镜像 '{made?.gameObject.name}'（sprite={(made != null && made.sprite != null ? made.sprite.name : "null")} 可点={!weHaveRoot}）");
+            return made ?? img;
+        }
+        catch { }
+        return img;
+    }
+
+    /// <summary>把模板里的一张底图逐项照抄成我们按钮下的子节点（同名、同 sprite/类型/倍率/颜色/矩形）。</summary>
+    private static Image MirrorImage(Image src, Transform parent, bool raycast = false)
+    {
+        if (src == null || parent == null) return null;
+        try
+        {
+            string childName = string.IsNullOrEmpty(src.gameObject.name) ? "Bg" : src.gameObject.name;
+            var exist = parent.Find(childName);
+            if (exist != null)
+            {
+                var ei = exist.GetComponent<Image>();
+                if (ei != null && raycast) { try { ei.raycastTarget = true; } catch { } }
+                return ei;
+            }
+
+            var go = new GameObject(childName);
+            go.transform.SetParent(parent, false);
+            var rt = go.AddComponent<RectTransform>();
+            var srt = src.rectTransform;
+            if (srt != null)
+            {
+                rt.anchorMin = srt.anchorMin; rt.anchorMax = srt.anchorMax;
+                rt.pivot = srt.pivot; rt.anchoredPosition = srt.anchoredPosition; rt.sizeDelta = srt.sizeDelta;
+                rt.offsetMin = srt.offsetMin; rt.offsetMax = srt.offsetMax;
+            }
+            else { rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero; }
+
+            var bimg = go.AddComponent<Image>();
+            bimg.sprite = src.sprite; bimg.type = src.type; bimg.color = src.color;
+            try { bimg.pixelsPerUnitMultiplier = src.pixelsPerUnitMultiplier; bimg.fillCenter = src.fillCenter; } catch { }
+            bimg.raycastTarget = raycast;
+            return bimg;
+        }
+        catch { return null; }
     }
 }

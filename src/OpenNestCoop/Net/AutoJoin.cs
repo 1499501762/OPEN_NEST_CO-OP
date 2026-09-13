@@ -42,6 +42,10 @@ public static class AutoJoin
     public static bool WantLanJoin;
     /// <summary>局域网目标主机 IP/机器名（--lanip，默认 127.0.0.1）。</summary>
     public static string LanIp = "127.0.0.1";
+    /// <summary>排障自检：--copytest 启动时写一次系统剪贴板并回读（验证Win32剪贴板通道）。</summary>
+    public static bool WantCopyTest;
+    /// <summary>排障自检：--lantab 打开联机菜单时直接选中“局域网”选项卡（无需点击）。</summary>
+    public static bool WantLanTab;
     /// <summary>本地模式端口。</summary>
     public static int LocalPort = NetConfig.LocalDefaultPort;
     /// <summary>网络延迟模拟：基础单向延迟 ms（--lag）。</summary>
@@ -99,6 +103,8 @@ public static class AutoJoin
                 {
                     LanIp = (args[++i] ?? "").Trim();
                 }
+                else if (a.Equals("--copytest", StringComparison.OrdinalIgnoreCase)) WantCopyTest = true;
+                else if (a.Equals("--lantab", StringComparison.OrdinalIgnoreCase)) WantLanTab = true;
                 else if (a.Equals("--localport", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 {
                     if (int.TryParse(args[++i], out int p) && p > 0 && p < 65536) LocalPort = p;

@@ -124,6 +124,8 @@ public class CoopUIManager : MonoBehaviour
     /// <summary>公开开关：切换联机菜单开/关（主菜单联机入口按钮调用，见 MainMenuEntry）。</summary>
     public static void ToggleMenu()
     {
+        // 环境里有 OpenNestUIKit → 菜单已经由它渲染（同一份数据、一页一件事）→ 开关也交给它
+        try { if (UIKitIntegration.TryToggleInUIKit()) return; } catch { }
         try
         {
             var inst = Instance;
@@ -132,6 +134,32 @@ public class CoopUIManager : MonoBehaviour
             inst.ApplyMenuState();
         }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] ToggleMenu: {ex.Message}"); }
+    }
+
+    /// <summary>UIKit 是否已接管整套联机菜单（接管后自带 UGUI 面板/聊天面板一律不显示）。</summary>
+    private static bool UiKitOwnsUi()
+    {
+        try { return UIKitIntegration.Connected; } catch { return false; }
+    }
+
+    /// <summary>接管后把自带界面收起来（面板 / 全屏拦截层 / 聊天浮窗 / 本地模式角色标识）。</summary>
+    private void HideLegacyUi()
+    {
+        try
+        {
+            if (_panel != null && _panel.activeSelf) _panel.SetActive(false);
+            if (_blocker != null && _blocker.activeSelf) _blocker.SetActive(false);
+            if (_chatRoot != null && _chatRoot.activeSelf) _chatRoot.SetActive(false);
+            if (_roleBadge != null && _roleBadge.gameObject.activeSelf) _roleBadge.gameObject.SetActive(false);
+            if (_menuOpen)
+            {
+                _menuOpen = false;
+                LockPlayer(false);
+                DisableInteractables(false);
+                CoopRuntime.LogSource?.LogInfo("[UI] OpenNestUIKit 接管 → 自带 UGUI 面板已收起");
+            }
+        }
+        catch { }
     }
 
     public static void ApplySharedFont(TextMeshProUGUI t)
@@ -145,23 +173,30 @@ public class CoopUIManager : MonoBehaviour
         try { img.color = new Color(0.10f, 0.12f, 0.16f, 1f); } catch { }
     }
 
-    /// <summary>复制文本到系统剪贴板（局域网 IP 一键复制；同时弹 toast 提示）。失败只日志，不抛。</summary>
+    /// <summary>复制文本到系统剪贴板（局域网 IP 一键复制；主路径 = Win32 原生，Unity 属性兜底）。
+    /// 成功 → toast 提示；失败 → 面板红字提示（同时日志记录走的哪条通道）。</summary>
     public static void CopyToClipboard(string text)
     {
         if (string.IsNullOrEmpty(text)) return;
-        try
+        bool ok = false;
+        try { ok = OpenNestCoop.Core.Clipboard.SetText(text); }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] CopyToClipboard: {ex.Message}"); }
+        CoopRuntime.LogSource?.LogInfo($"[UI] clipboard copy ok={ok} via={(ok ? OpenNestCoop.Core.Clipboard.LastPath : "-")} text='{text}'");
+        if (ok)
         {
-            GUIUtility.systemCopyBuffer = text;
-            CoopRuntime.LogSource?.LogInfo($"[UI] clipboard copy '{text}'");
             try { OpenNestCore.UI.NativeUi.Toast(CoopLoc.Copied, text, 2f); } catch { }
         }
-        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] CopyToClipboard: {ex.Message}"); }
+        else
+        {
+            var net0 = CoopRuntime.Net;
+            if (net0 != null) net0.LastError = CoopLoc.ErrCopyFailed.Replace("{0}", text);   // 面板红字（会触发重建）
+        }
     }
 
-    /// <summary>读系统剪贴板（局域网 IP 一键粘贴）。失败/空 → 空串。</summary>
+    /// <summary>读系统剪贴板（局域网 IP 一键粘贴；先 Win32 再 Unity）。失败/空 → 空串。</summary>
     public static string ReadClipboard()
     {
-        try { return GUIUtility.systemCopyBuffer ?? ""; } catch { return ""; }
+        try { return OpenNestCoop.Core.Clipboard.GetText() ?? ""; } catch { return ""; }
     }
 
     /// <summary>输入框聚焦（CoopInputBox.Focus 调用）：登记种类 + 唤起 IME 锚点 + 重置首字符缓冲。</summary>
@@ -207,6 +242,14 @@ public class CoopUIManager : MonoBehaviour
 
     public void Update()
     {
+        // UIKit 接管时：自带界面（面板 / 输入 / IME / 聊天浮窗）全部不参与，直接收起来并早退 ——
+        // 同一份数据由 UIKit 的声明式页面渲染（见 UI/UIKitIntegration.cs），这里只保留**回退**用途。
+        if (UiKitOwnsUi())
+        {
+            HideLegacyUi();
+            return;
+        }
+
         // 语言跟随：CoopLoc 语言变化时更新常驻按钮文字（左上角开关；节流 1s，避免每帧读 LocalisationManager）
         try
         {
@@ -225,6 +268,17 @@ public class CoopUIManager : MonoBehaviour
 
         try { PollInput(); }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] PollInput: {ex.Message}"); }
+
+        // 排障：--lantab → 强制选中局域网选项卡（免点击自检，见 docs/DEVELOPMENT.md）
+        try
+        {
+            if (OpenNestCoop.Net.AutoJoin.WantLanTab && _idleTab != 1 && _menuOpen && CoopRuntime.Net != null && CoopRuntime.Net.State == SessionState.Idle)
+            {
+                _idleTab = 1;
+                Rebuild();
+            }
+        }
+        catch { }
 
         // 局域网选项卡：打开时周期扫描（3s）+ 过期条目清理（发现是尽力而为，不能影响帧率）
         try
@@ -567,9 +621,11 @@ public class CoopUIManager : MonoBehaviour
     {
         try
         {
-            if (_blocker != null) _blocker.SetActive(_menuOpen);
-            if (_menuOpen) LockPlayer(true); else LockPlayer(false);
-            if (_menuOpen) DisableInteractables(true); else DisableInteractables(false);
+            bool show = _menuOpen && !UiKitOwnsUi();     // UIKit 接管时自带面板一律不显示
+            if (_panel != null) _panel.SetActive(show);
+            if (_blocker != null) _blocker.SetActive(show);
+            if (show) LockPlayer(true); else LockPlayer(false);
+            if (show) DisableInteractables(true); else DisableInteractables(false);
         }
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] ApplyMenuState: {ex.Message}"); }
     }
@@ -644,11 +700,7 @@ public class CoopUIManager : MonoBehaviour
         _blocker.SetActive(false);
 
         // 左上角开关（常驻，可重开菜单）；存文字引用，语言变化时实时更新（见 Update）
-        var menuToggle = MakeButton(_root.transform, CoopLoc.MenuToggle, 8, 8, 130, 30, () =>
-        {
-            _menuOpen = !_menuOpen;
-            ApplyMenuState();
-        });
+        var menuToggle = MakeButton(_root.transform, CoopLoc.MenuToggle, 8, 8, 130, 30, ToggleMenu);
         try { _menuToggleText = menuToggle.GetComponentInChildren<TextMeshProUGUI>(true); _lastLang = CoopLoc.Current; } catch { }
 
         // 本地模式大号角色标识（左下角，常驻）：只在 LocalMode 下显示，HOST 红 / CLIENT 绿
@@ -963,6 +1015,8 @@ public class CoopUIManager : MonoBehaviour
     private void RebuildChat()
     {
         if (_chatRoot == null || _chatContent == null) return;
+        // UIKit 接管时聊天是 UIKit 的一页（provider:open-nest-coop:chat）→ 自带聊天浮窗隐藏
+        if (UiKitOwnsUi()) { try { _chatRoot.SetActive(false); } catch { } return; }
         var net = CoopRuntime.Net;
         if (net == null) return;
         try
@@ -1154,7 +1208,8 @@ public class CoopUIManager : MonoBehaviour
     private void Rebuild()
     {
         CoopLoc.Refresh(); // 跟随游戏语言
-        if (_panel != null) _panel.SetActive(_menuOpen);
+        if (_panel != null) _panel.SetActive(_menuOpen && !UiKitOwnsUi());
+        if (UiKitOwnsUi()) return;                 // UIKit 接管：不自建面板内容
 
         // 整体销毁旧内容（先隐藏再销毁，避免闪一帧旧内容）
         if (_content != null)
@@ -1202,7 +1257,27 @@ public class CoopUIManager : MonoBehaviour
         }
         else
             BuildLobby(net, ref y);
+        // ⚠️ 2026-09-12：面板**动态高度**（内容多长面板就多高，上限 = 屏幕高-120）——
+        // 之前是固定 PH=700，内容超出会把下部行挤到面板外。
+        ApplyPanelHeight(y);
         // 聊天面板由 Update 独立驱动（ChatKey 变化时重建），不在此处重建
+    }
+
+    /// <summary>面板/内容的可用最大高度（给列表限高用；与 <see cref="ApplyPanelHeight"/> 保持一致）。</summary>
+    private static float MaxPanelHeight => Mathf.Max(260f, Screen.height - 120f);
+
+    /// <summary>面板动态高度：按内容实际高度调整（短则缩、长则增，上限 = 屏幕高-120）；
+    /// 面板为屏幕中心锚点 → 高度变化上下对称生长，无需改位置。</summary>
+    private void ApplyPanelHeight(float contentBottom)
+    {
+        try
+        {
+            if (_panelRt == null) return;
+            float h = Mathf.Clamp(contentBottom + 14f, 240f, MaxPanelHeight);
+            _panelRt.sizeDelta = new Vector2(PW, h);
+            if (_content != null) _content.sizeDelta = new Vector2(PW, Mathf.Max(h, contentBottom + 14f));
+        }
+        catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"[UI] ApplyPanelHeight: {ex.Message}"); }
     }
 
     private void StatusLine(ref float y, string text)
@@ -1274,16 +1349,24 @@ public class CoopUIManager : MonoBehaviour
         });
         y += 42;
 
-        // 本机 IP（主机建房后告诉队友连哪个）+ 一键复制 ip:port
+        // 本机 IP（多网卡 → **每个 IP 一行**，各带复制按钮；不换行，过长省略号，避免把布局挤乱）
         try
         {
             var ips = OpenNestCoop.Net.LanTransport.LocalIPv4();
             if (ips.Count > 0)
             {
-                string ipPort = ips[0] + ":" + net.LanJoinPort;
-                var ipT = MakeText(_content, $"{CoopLoc.LanMyIp}: <color=#8f8>{string.Join(" / ", ips)}</color>:{net.LanJoinPort}", 12, y, PW - 96, 20, 13, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left);
-                ipT.richText = true;
-                MakeButton(_content, CoopLoc.Copy, PW - 74, y, 62, 20, () => CopyToClipboard(ipPort));
+                MakeText(_content, CoopLoc.LanMyIp, 12, y, PW - 24, 20, 13, new Color(0.85f, 0.9f, 1f), TextAlignmentOptions.Left);
+                y += 22;
+                foreach (var ip in ips)
+                {
+                    string ipPort = ip + ":" + net.LanJoinPort;
+                    var ipT = MakeText(_content, $"<color=#8f8>{ipPort}</color>", 18, y, PW - 96, 20, 13, Color.white, TextAlignmentOptions.Left);
+                    ipT.richText = true;
+                    ipT.enableWordWrapping = false;                       // 单行不换行
+                    ipT.overflowMode = TMPro.TextOverflowModes.Ellipsis;   // 过长省略号，不超出面板
+                    MakeButton(_content, CoopLoc.Copy, PW - 74, y, 62, 20, () => CopyToClipboard(ipPort));
+                    y += 22;
+                }
             }
         }
         catch { }
@@ -1330,9 +1413,12 @@ public class CoopUIManager : MonoBehaviour
         }
         else
         {
+            // 面板高度上限内能放多少就放多少（超出用语言键提示，避免把提示行/布局挤出去）
+            float listMaxY = MaxPanelHeight - 64f;
+            int shown = 0;
             foreach (var room in rooms)
             {
-                if (y > PH - 70) break;
+                if (y > listMaxY) break;
                 string ver = string.IsNullOrEmpty(room.Version)
                     ? "<color=#ff6b6b>?</color>"
                     : (room.Version == NetConfig.Version
@@ -1342,6 +1428,8 @@ public class CoopUIManager : MonoBehaviour
                 var rt = MakeText(_content, $"{lockTag}{room.Name} ({room.Players}/{room.MaxPlayers}) {ver}  <color=#aaa>{room.Host}</color>",
                     12, y, PW - 172, 22, 13, Color.white, TextAlignmentOptions.Left);
                 rt.richText = true;
+                rt.enableWordWrapping = false;
+                rt.overflowMode = TMPro.TextOverflowModes.Ellipsis;
                 string roomIp = room.Host + ":" + room.Port;
                 MakeButton(_content, CoopLoc.Copy, PW - 146, y, 56, 22, () => CopyToClipboard(roomIp));
                 MakeButton(_content, CoopLoc.Join, PW - 84, y, 72, 22, () =>
@@ -1357,6 +1445,13 @@ public class CoopUIManager : MonoBehaviour
                     net.JoinLanRoom();
                 });
                 y += 26;
+                shown++;
+            }
+            if (shown < rooms.Count)
+            {
+                var moreT = MakeText(_content, OpenNestCoop.Core.Loc.LocFile.Get("LanMoreRooms", rooms.Count - shown), 12, y, PW - 24, 20, 12, new Color(0.75f, 0.75f, 0.6f), TextAlignmentOptions.Left);
+                moreT.richText = true;
+                y += 22;
             }
         }
 

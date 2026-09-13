@@ -6,11 +6,11 @@ using OpenNestCoop.Core;
 namespace OpenNestCoop.GameSync;
 
 /// <summary>
-/// 铁巢（TurretController）位置同步（MsgType=146，2026-08-26 新增，对齐 Synchrony NestMoveBridge）。
+/// 铁巢（TurretController）位置同步（MsgType=146，2026-08-26 新增，对齐 官方联机 NestMoveBridge）。
 /// 铁巢是玩家基地/堡垒（TurretController）——炮弹从铁巢坐标发射到着弹点，追踪器（Map Table_ Shell
 /// Trajectory display）从铁巢坐标一路移动到着弹点。两端铁巢位置初始化不同 → 追踪器轨迹/炮弹落点/打字机
 /// [GRID &lt;turret&gt;] 等依赖铁巢基准的功能两端不同（“追踪器还是不同步”根因）。
-/// 方案（对齐 Synchrony）：**主机权威**——patch TurretController.MoveTurret/SetTurretLocation，
+/// 方案（对齐 官方联机）：**主机权威**——patch TurretController.MoveTurret/SetTurretLocation，
 /// 主机移动铁巢 postfix 广播位置，客机拦截本地移动（除非正在应用广播），接收后防环应用。
 /// 铁巢位置两端一致 → 依赖铁巢坐标的本地计算（追踪器/落点/打字机坐标）两端一致。
 ///

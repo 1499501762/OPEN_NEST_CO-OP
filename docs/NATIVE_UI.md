@@ -8,11 +8,49 @@
 > （模组 UGUI 菜单，2026-08 起用）、`src/OpenNestCoop/GameSync/NotificationSync.cs`、`src/OpenNestCore/UI/*`。
 >
 > **更新记录**：
+> - 2026-09-13 **修正上一版的错误归因：“ESC 菜单注入项没有字”的真因是 TMP 截断模式 + 文字框比行高还矮**（用户：“文字显示正常了”）：
+>   照抄模板内边距后，格子 121×38 的文字框只剩 **81×18**，而 CourierPrime **行高 ≈ 1.467×字号**（18 号 ≈ 26.4px）→
+>   18 < 26.4，TMP 在 `TextOverflowModes.Ellipsis` 下判定“这行放不下 → **整行不画**”（`行数=0 字符=0`），
+>   而底图 Image 照画 → 用户看到“白框、里面没有字”。原生模板同样只有 20 高却没事，因为原生用 `Overflow`。
+>   修法：`NativeMenuInjector.StyleGridCell` 把文字框**垂直铺满**格子（保留左右内边距）。铁证：`nativebtn` 的 X/Y 对照
+>   （同画布同代码，只差文字框高）`X 旧:文字框18高 行数=0 字符=0` / `Y 修:文字框铺满 行数=1 字符=6`。
+>   注：黑 tint（踩坑 13）是**真的会生效**，但它造成的是“框黑”而不是“没字”——两个问题同时存在，别再把它们混成一个。
+> - 2026-09-13 **注入项的尺寸与颜色按用户两条反馈定稿**：
+>   ① 颜色“**改为抄颜色而不是瞎改成白的**” → `NativeMenuStyler.CopyTint` 不再把原生黑 tint 换白底，
+>      而是**连结构一起抄**：`colors`/`transition` 原样照抄 + 照原生把 tint 打在**镜像出来的子节点**（原生是子物体 `Bg`）上，
+>      根底图不吃 tint → 静止时与原生纸面完全一致，悬停仍有反馈；Coop 自带回退注入 `MainMenuEntry.CopyTintLikeNative` 同口径。
+>   ② “**各个按钮没有对应的缩小一些，高度不够挤在一起了**” → 以前只压间隔，原生 40 高的框挤到 30 的节距上会互相压 10px；
+>      现按 `ScaleNativeRow` 把**原生行的框与字号按同一 k 一起缩**（k = (可用高−我们块)/原生跨度，下限 0.72；原值取模板故不会越缩越小）。
+>      实测 k=0.898：原生 250×40 → 225×36、字号 25 → 22.46、节距 35.6 → 32（节距/框高仍为游戏自己的 0.89）；
+>      我们的格子缩到 **121×30 / 字号 16**（`GridCellH` / `GridFont`），块内行距 33。详见踩坑 14、15。
+> - 2026-09-13 **注入项“没有字”的真正原因 = 文字被提亮成白色（白字白底）**（用户：“ESC菜单里的注入项还是没有字”）：
+>   实测原生 ESC 按钮正文是**纯黑**（`颜色=RGBA(0,0,0,1)`），因为按钮/面板底图 `UI Box Castile` 是**浅色纸面**
+>   （`底色=RGBA(1,1,1,1)`）。上一版给文字加了“亮度太低就当看不清 → 退成白色”的规则 → 白字白底全看不见。
+>   现在 `NativeMenuStyler.CopyTextVisual` **原样照抄模板正文颜色**（只跳过 shadow/outline/glow 与 alpha≈0 的副本），
+>   并新增对比度兜底 `EnsureTextContrast`（深底才翻白字）。取证命令：`esctext`（逐项对比“我们 vs 原生模板”）+
+>   `escframe:<名>`（临时激活容器祖先链截图）；详见第七节踩坑 12。
 > - 2026-08-23 建档：原生 UI 研究 + `OpenNestCore.UI` 抽象（INativeUiService + NativeUi + UiKit）+ 游戏侧桥接 IronNestNativeUi。
 > - 2026-08-23 原生 UI 图集（sprite）复现：全盘确认游戏**无 UI AssetBundle**（仅 player.bundle）→ 走"自打包 ui.bundle + UiSpriteBank"路线；Core 新增 `UiSpriteBank`（经 AssetBundleIron 加载 Sprite）+ `UiKit.MakePanel/MakeButton(bgSprite:)`。
 > - 2026-08-23 主菜单联机入口：patch 原生主菜单程序化脚本（`MainMenuStateRelay.HandleMainMenuLoaded`）→ 设置菜单 Apply 按钮右侧 + ESC 菜单"设置"按钮下方注入"联机"入口按钮（`UI/MainMenuEntry.cs`，自建抄模板样式，避免克隆带链接脚本）；联机大厅面板标题栏右侧加"关闭"按钮。详见第七节。
+> - 2026-09-13 **联机菜单改成“一页 + 页签”（对齐原面板，不再层层嵌套）**：
+>   UIKit 版联机菜单现在**只有一页**：状态区 + 页签 [Steam 大厅][局域网][设置]（未联机）/ [房间·成员][聊天]（已联机），
+>   页签下的内容渲染在同一页（与原面板“切页签换内容”一致）；ESC 里的入口点一下**直开这一页**（叶子条目不再先过原生页，少一层）。
+>   页签用契约新增的 `UiPageDef.Tabs(...)`。
+> - 2026-09-13 **联机菜单整套改由 UIKit 渲染（软依赖，代注入入口）**：
+>   环境里有 UIKit 时，**自带 UGUI 面板/聊天浮窗自动收起**（不再两个面板同时显示），F8 / 主菜单入口 / ESC 入口
+>   打开的都是 **UIKit 的联机页**：根页（状态 + 去向）→ Steam 大厅（房间名·密码·人数·创建·刷新·重连·列表逐条加入）/ 
+>   局域网（身份·名字·本机 IP 一键复制·创建·手动 IP:端口 + 粘贴·加入·扫描·房间列表）/ 房间与成员（信息·成员·角色·踢出·邀请·离开）/ 
+>   聊天（历史 + 输入 + 发送）/ 同步设置 / 关于；动态内容用 `UiKitHost.Refresh()` 原地刷新，**打字时不刷**。
+>   旧面板（`CoopUIManager`）降为“没装 UIKit”时的回退（见更新记录上一条）。
+> - 2026-09-13 **联机入口的注入改由 OpenNestUIKit 代做**（用户要求：“注入这两个菜单选项到 ESC 也改为同样的由 UIKit 实现”）：
+>   环境里有 UIKit 时，`MainMenuEntry` **跳过**自己的 ESC 注入（日志：“ESC 入口已交给 OpenNestUIKit 注入 → 本模组跳过 ESC 注入”），
+>   ESC 列表里那一行改由 UIKit 以 `provider:open-nest-coop` 注入（原生样式、不挪动原生行）；
+>   主菜单 Apply 旁的那个入口与 ESC 入口点击时都优先打开 **UIKit 的联机页**（菜单 UI 统一走 UIKit），
+>   UIKit 不在（或还没就绪）→ 回退本节描述的旧行为。联机大厅面板仍是本模组自带实现（下一阶段才迁）。
 > - 2026-08-23 主菜单联机入口迭代（最终）：ESC 菜单重排为**10 按钮统一间距 38 / 按钮高 38 / 字号固定 20 + 强制关 autoSizing / 加粗（抄 fontStyle）/ 内边距照抄（20/10）**。修复 **slot 冲突 bug**（联机插入后所有后续按钮必须整体让位，否则挤同格/间距错乱——先后踩过两版：联机=Feedback 同格、Feedback=BUG 同格）；**模板按钮按名精确选**；**字号"忽大忽小"根因=autoSizing**（抄某按钮 autoSizing=true 会被按钮尺寸缩放文字，强制关 autoSizing + 固定字号解决）；诊断日志全部降级 `CoopLog.Debug`。详见第七节。
 > - 2026-08-23 主菜单联机入口：入口按钮文字改用 `CoopLoc.Entry` 语言键（**联机菜单/Coop Menu**，与左上角开关 `MenuToggle` 同义），"关闭"按钮改用 `CoopLoc.Close`；**MainMenuEntry 注入前必须 `CoopLoc.Refresh()`**（CoopLoc 只在 CoopUIManager.Rebuild 刷新，主菜单注入时可能未刷新 → 按钮恒中文）；**左上角开关语言实时跟随**（CoopUIManager.Start 先 Refresh + Update 1s 节流检测语言变化更新文字）。
+> - 2026-09-12 九宫格切片：新增离线切片工具 `tools/slice_tool.py` + 切片定义文件（`OpenNestUIKit.slices.ini`），
+>   并说明“作者 border 在小控件上放不下 + `pixelsPerUnitMultiplier` 无效”的正确解法（见 §六 路线①提取小节 + `docs/UI_KIT_SLICE.md`）。
 > - 关联文档：`docs/OPEN_NEST_CORE.md`（Core API）、`docs/INTERACTABLES.md`（世界内可交互实体——与"屏幕 UI"不同范畴）。
 
 ---
@@ -174,6 +212,9 @@ var input = UiKit.MakeInputField(canvas.transform, "", 10, 60, 300, 40, 15); // 
 
 **路线 ②（备用）：自打包 UI bundle（沿用 player.bundle 流程）**
 - **提取**：`tools/extract_ui_sprites.py`（UnityPy）从 `sharedassets0.assets` 导出 sprite → PNG（含 border 清单）。`--match 正则` 按名筛：主菜单框架 40 个已导出到 `ref/ui_sprites_menu/`（`--match "^(key art|SGRounded|SUGGradientRounded|...)"`），任务/结算全套到 `ref/ui_sprites/`。
+- **切片切割线（九宫格）**：提取出的作者 border 常常在小控件上放不下（会被 `Image.GetAdjustedBorders` 整体压缩），
+  且 `pixelsPerUnitMultiplier` 在本游戏 IL2CPP 下无效 → 用**离线切片工具** `tools/slice_tool.py` 人工定准
+  （GUI 拖切线 + 多尺寸预览，导出 `OpenNestUIKit.slices.ini`，库 2 秒热重载），详见 `docs/UI_KIT_SLICE.md`。
 - **打包**：用 Unity 把这些 PNG 做成 atlas（保持 border 九宫格）→ 打包成 `Models\ui.bundle`（与 `player.bundle` 同流程）。
 - Core 侧：`OpenNestCore.UI.UiSpriteBank`（`src/OpenNestCore/UI/UiSpriteBank.cs`）用 **`AssetBundleIron`（Core 已打通的 LoadFromStream 加载器）**加载该 bundle + 缓存 Sprite：
   - `UiSpriteBank.Load("Models/ui.bundle")` / `Get("PanelBackground")` / `LoadAllSprites()` / `Unload()`
@@ -240,3 +281,53 @@ var input = UiKit.MakeInputField(canvas.transform, "", 10, 60, 300, 40, 15); // 
     把字号**自动缩小**（如 20 → 更小 → 用户觉得"过小"）；抄 25 又偏大。各按钮字号/autoSizing 不统一 → **正确做法：
     字号固定 20 + 强制 `enableAutoSizing=false`**（不抄任何按钮）。**加粗**：原生按钮文字是 **Bold**，须抄模板 `fontStyle`
     （默认 Normal 细体）。垂直内边距照抄模板（20/10）。25 偏大 / 20 正常（实测结论）。
+12. **文字颜色必须“原样照抄”（2026-09-13）**：本游戏原生 ESC 按钮的正文是**纯黑**（`颜色=RGBA(0,0,0,1)`），
+    因为按钮/面板底图 `UI Box Castile` 是**浅色纸面**（实测 `底色=RGBA(1,1,1,1)`）。曾经加过一条“亮度太低就
+    当看不清 → 退成白色”的规则 —— **这条规则是错的**（白字白底也看不见）。正确做法：模板正文什么颜色就抄什么，
+    只跳过名字含 shadow/outline/glow 与 alpha≈0 的副本；另加对比度兜底 `EnsureTextContrast`。
+13. **`Selectable` 的 tint 会真的生效 → 底图被染黑（是“框黑”，不是“没字”）（2026-09-13 实测）**：
+    原生按钮的 `Button.colors.normalColor` 是**纯黑**（`RGBA(0,0,0,1)`），而它自己的 tint 目标
+    （`targetGraphic`）是子物体 `Bg`（`渲染色=RGBA(0,0,0,1)`，但原生那儿看不见、无害）。
+    **我们把底图 Image 放在按钮自己身上** → `AddComponent<Button>()` 时它自动成为 `targetGraphic`
+    → ColorTint 真的生效：`底色(白) × normalColor(黑) = 黑块`。
+    为什么难查：`img.color` 读出来**仍是白**、文字颜色/字体/材质/尺寸/cull 全对 —— 只有
+    `CanvasRenderer.GetColor()`（最终渲染色）被 tint 改了（TMP 文字读回是白，因为它走材质不走 CanvasRenderer）。
+    **修法（用户：颜色“改为抄颜色而不是瞎改成白的”）**：`NativeMenuStyler.CopyTint` 不做“太暗就换白底”，
+    而是**连结构一起抄** —— `colors`/`transition` 原样照抄 + 把 tint 打到**镜像出来的同名子节点**（`Bg`）上，
+    根底图不吃 tint（原生怎么做的我们就怎么做）。Coop 自带回退注入 `MainMenuEntry.CopyTintLikeNative` 同口径
+    （那份代码不能引用 UIKit）。
+    诊断：`esctext` 并排打印原生模板与我们的 `Selectable 过渡/normal/target` + 每个 Graphic 的 `渲染色`。
+    > 诊断命令（`OpenNestUIKit.Test`）：`esctext` 逐行打印我们注入行与**原生模板**的
+    > 底图/底色、字体、材质、着色器、字号、颜色、文本矩形、字符数/顶点数、每个 Graphic 的渲染色——**两边一致 = 可见性一致**；
+    > `escframe:<名>` 把 ESC 容器的祖先链**临时激活**几帧后截图（自动化里按不了 ESC，只能这样“举起来看一眼”），
+    > 截完立刻还原（改 active 必须还原，见 `TestDriver.EscMode` 的注释）。
+    > ⚠ `ScreenCapture.CaptureScreenshot` 在本机**经常写不出文件**（截图失败只警告）→ 客观验收优先用数值探针。
+14. **★★★ 注入项“没有字”的“真”真因 = TMP 截断模式 + 文字框比行高还矮（2026-09-13 终局）**：
+    照抄模板内边距后，格子 121×38 的文字框只剩 **81×18**；而 CourierPrime **行高 ≈ 1.467 × 字号**
+    （18 号 ≈ 26.4px、16 号 ≈ 23.5px）→ **18 < 26.4** → TMP 在 `Ellipsis`（截断类）模式下判定
+    “这一行放不下 → **整行丢掉**”：`行数=0 字符=0 可见字符=0`，而底图继续画 ⇒ “**白框里没有字**”。
+    原生模板的文字框也只有 20 高（字号 25！）却正常，因为原生用 `Overflow`（不裁剪）。
+    修法：`NativeMenuInjector.StyleGridCell` 把文字框**垂直铺满**格子（`offsetMin.y = offsetMax.y = 0`，保留左右内边距）
+    —— 行高放得下，省略号也还能用。铁证（`nativebtn` 的可控对照，同画布同代码只差文字框高）：
+    `X 旧:文字框18高 → 行数=0 字符=0` / `Y 修:文字框铺满 → 行数=1 字符=6`。
+    ⇒ 经验：字“没画出来”优先查 `textInfo.lineCount / characterCount`（必要时 `ForceMeshUpdate`），别只查颜色/字体/tint。
+15. **压缩间隔的同时必须把按钮也缩（2026-09-13，用户：“各个按钮没有对应的缩小一些，高度不够挤在一起了”）**：
+    我们的注入块要占地方 → 原生节距被压小；只压间隔的话，原生 40 高的框挤到 30 的节距上会互相压 10px，看着挤成团。
+    现在 `NativeMenuInjector.ScaleNativeRow` 把**原生行的框和字号按同一 k 一起缩**（只缩框不缩字会出现“字穿出格子”，
+    之前就报过）：k = (可用高 − 我们块高) / 原生跨度，夹到 `MinNativeScale=0.72`～1，**原值一律从模板取**（不会越缩越小）。
+    实测（注入 3 项、k=0.898）：原生 `250×40 → 225×36`、字号 `25 → 22.46`、节距 `35.6 → 32`，
+    节距/框高比仍是游戏自己的 0.89 → 叠加量与原生自身同级，不再额外挤；我们的格子 `121×30`、字号 16、块内行距 33。
+    取证：`menutree`（每行尺寸/字号/Δy）+ `native.log` 的“注入 N 项 … 压缩=0.898 … 格子=121x30×2行”。
+16. **自己造的按钮必须留一个“可点层”（2026-09-13 踩到）**：为了消除“白色叠层”，我们把“自己给按钮根挂的底图”去掉、
+    改成只镜像原生那一层 —— 结果**按钮点不了了**。原因：UGUI 靠 `Graphic.raycastTarget` 命中，去掉根底图后就没人吃射线了。
+    修法：**只把“当底图的那层”设为 `raycastTarget=true`**（原生按钮的 `Bg` 就是 `ray=True`，见 `pagedump`），
+    其余层（阴影、装饰）一律 `false`。同一条也适用于 Coop 自带的回退注入（`MainMenuEntry.MirrorImage(..., raycast:)`）。
+    同一根因也出现在 Coop 的 Settings 页注入（“右下角 CoopMenu 也有白色叠层”）→ 两处都改成“模板根有 Graphic 才自建根底图”。
+17. **原生子页的控件可以“照抄”——素材都在原生 `Settings menu` 页里（2026-09-13）**：
+    大标题 `Title Settings`、小标题 `HeadlineUGUI`(TextTf 大字 + `RawImage` 下划线)、选项卡 `TabsCtn`+`TabButtonUGUI`、
+    检查框 `ToggleConsoleUGUI`(`SUGGradientRounded` 20x20 + `SGCheckMark`)、拖拽条 `SliderConsoleUGUI`
+    （`SGRounded` 轨道/填充 + `Handle` + 右侧数值）、下拉框 `DropdownUGUIWithLabel`(`SUGGradientRounded` 黑 0.902
+    + `SGDownArrow` + 展开列表)、输入框 `InputField (TMP)`、主/次按钮 `SGButtonPrimaryUGUI`/`ButtonSecondaryUGUI`。
+    实现：`Native/NativeWidgets.cs`（`NativeRow`/`Capture()`/`BuildXxx`）+ `NativeMenuPage.ShowRows(...)`
+    + `NativeMenuEntry.RowPage`；诊断 `pagedump[:页名]`，演示 `nativew`。
+    注意：原生设置页的“整宽行”是 742 单位，我们在**小面板**里只有 250 ⇒ **不能直接搬数值**，按相对观感取尺寸、字号自适应。

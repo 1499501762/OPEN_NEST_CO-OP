@@ -410,7 +410,7 @@ public static class ControlSync
         // 拉环（Trigger/Starter Chain）：拉动时链的位置有视觉表现，需对端高频一致（30Hz）
         if (IsChain(path)) b.HighFreq = true;
         // 仰角物理拉杆（Elevation Lever Left/Right）：30Hz 高频——快速拖动时 0.2s 低频
-        // 会丢中间值 → 两端 Lever 物理位置不同步（Synchrony TurretLeverBridge 同 0.033s）。
+        // 会丢中间值 → 两端 Lever 物理位置不同步（官方联机 TurretLeverBridge 同 0.033s）。
         if (path.IndexOf("Elevation Lever", StringComparison.OrdinalIgnoreCase) >= 0)
             b.HighFreq = true;
         // 仰角"Desired"从动值（联动 follower 输出）：client 本地未驱动时读 0，双向同步会上行 0 覆盖 host

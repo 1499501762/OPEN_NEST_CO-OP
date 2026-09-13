@@ -4,7 +4,7 @@ public static class NetConfig
 {
     public const string Guid = "dev.open-nest.coop";
     public const string Name = "Open Nest Co-op";
-    public const string Version = "0.2.1-Alpha-2";
+    public const string Version = "0.2.1-Alpha-3";
 
     public const int DefaultMaxPlayers = 4;
     public const int P2PChannel = 0;

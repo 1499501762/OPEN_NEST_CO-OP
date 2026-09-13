@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestUIKit.API</AssemblyName>
+    <RootNamespace>OpenNestUIKit.API</RootNamespace>
+    <Version>0.0.1-Alpha-4</Version>
+    <!--
+      OpenNestUIKit 契约程序集（纯 .NET：无 Unity / Il2CppInterop / 游戏程序集依赖）。
+      用途：第三方模组只引用本 dll（**软依赖**）即可把自己的菜单页注册进原生 UI 库 ——
+            未安装 OpenNestUIKit 时，注册只是进内存注册表（UiKitHost.IsHostAvailable=false），
+            不影响第三方模组自身加载。BepInEx 与 MelonLoader 双端可用同一份 dll。
+      设计文档：docs/UI_KIT.md
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 允许宿主把「宿主已就绪」标记写进注册表（第三方无法调用） -->
+    <InternalsVisibleTo Include="OpenNestUIKit" />
+    <InternalsVisibleTo Include="OpenNestUIKit.MelonMod" />
+  </ItemGroup>
+
+</Project>

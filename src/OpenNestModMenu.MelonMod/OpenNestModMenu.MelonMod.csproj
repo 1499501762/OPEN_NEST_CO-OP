@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OpenNestModMenu.MelonMod</AssemblyName>
+    <RootNamespace>OpenNestModMenu</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.0.3</Version>
+    <!--
+      OpenNestModMenu —— 独立模组（MelonLoader 版）。
+      与 BepInEx 版共用同一份源码（src\OpenNestModMenu\**），只换入口壳：
+        本工程编 MelonModEntry.cs，排除 BepInEx 的 Plugin.cs。
+      ⚠️ 本 dll 也可经桥 BepInEx.MelonLoader.Loader 在 BepInEx 宿主里运行（别名策略，见 docs/MOD_MENU.md §3.2）。
+    -->
+    <DefineConstants>$(DefineConstants);MELONLOADER</DefineConstants>
+    <!-- 0Harmony 引用路径（编译期解析用；运行时由宿主提供） -->
+    <GameDir Condition="'$(GameDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator</GameDir>
+    <!-- MelonLoader 宿主游戏（本地双开客户端）；优先取 env.ps1 导出的 $env:ClientGame -->
+    <ClientGame Condition="'$(ClientGame)'==''">C:\Iron Nest Heavy Turret Simulator</ClientGame>
+    <!-- MLBase：引用客户端游戏内已生成好的 MelonLoader Il2CppAssemblies（$(MLBase)\MelonLoader\Il2CppAssemblies\） -->
+    <MLBase>$(ClientGame)</MLBase>
+    <!-- MelonLoader 宿主 dll（$(MLCore)\MelonLoader.dll + Il2CppInterop.Runtime.dll） -->
+    <MLCore>$(ClientGame)\MelonLoader\net6</MLCore>
+  </PropertyGroup>
+
+  <!-- 共享主体源码（含 Vendor 副本 + 双端壳中的 MelonModEntry；排除 BepInEx 的 Plugin.cs） -->
+  <ItemGroup>
+    <Compile Include="..\OpenNestModMenu\**\*.cs"
+             Exclude="..\OpenNestModMenu\obj\**;..\OpenNestModMenu\bin\**;..\OpenNestModMenu\Plugin.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 契约程序集（部署到 UserLibs，供 MLL 侧第三方模组解析） -->
+    <ProjectReference Include="..\OpenNestModMenu.API\OpenNestModMenu.API.csproj" />
+    <!-- OpenNestUIKit 契约（可选依赖；Private=false = 不随本模组部署，运行时反射探测 + NoInlining 隔离） -->
+    <ProjectReference Include="..\OpenNestUIKit.API\OpenNestUIKit.API.csproj" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader 0.7.3 API（MelonMod/MelonLogger/MelonInfo/MelonGame） -->
+    <Reference Include="MelonLoader" HintPath="$(MLCore)\MelonLoader.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(MLCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <!-- Harmony：MelonLoader 内嵌 0Harmony（与 BepInEx 同款）。编译期用 BepInEx core 的 0Harmony.dll 解析；运行时由宿主提供。 -->
+    <Reference Include="0Harmony" HintPath="$(GameDir)\BepInEx\core\0Harmony.dll" Private="false" />
+    <!-- Unity + 游戏 interop（MelonLoader Il2CppAssemblies） -->
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="Unity.InputSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Unity.InputSystem.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.dll" Private="false" />
+    <Reference Include="Il2CppSystem.Core" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Il2CppSystem.Core.dll" Private="false" />
+    <!-- 游戏程序集（interop；仅"游戏侧桥接"用，Vendor 基线代码不得引用它） -->
+    <Reference Include="Assembly-CSharp" HintPath="$(MLBase)\MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- 构建后部署：主 dll → Mods\，契约 dll → UserLibs\（MelonLoader 依赖惯例位置） -->
+  <Target Name="DeployToMods" AfterTargets="Build" Condition="'$(DeployToMods)' == 'true'">
+    <ItemGroup>
+      <_ModFiles Include="$(TargetDir)OpenNestModMenu.MelonMod.dll" />
+      <_ModFiles Include="$(TargetDir)OpenNestModMenu.MelonMod.pdb" Condition="Exists('$(TargetDir)OpenNestModMenu.MelonMod.pdb')" />
+      <_LibFiles Include="$(TargetDir)OpenNestModMenu.API.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ModFiles)" DestinationFolder="$(MLBase)\Mods\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LibFiles)" DestinationFolder="$(MLBase)\UserLibs\" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed OpenNestModMenu (MLL) to $(MLBase)\Mods\ + UserLibs\" />
+  </Target>
+
+</Project>

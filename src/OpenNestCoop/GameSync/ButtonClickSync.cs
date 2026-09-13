@@ -18,14 +18,6 @@ namespace OpenNestCoop.GameSync;
 public sealed class ButtonClickSync : ISyncedModule
 {
     public int MsgType => 118;
-
-    // ⚠️ 模块自注册：程序集加载时入队（V1 方案，含附加类型 135），Startup FlushPending 统一注册；同时注册中途加入快照
-    [System.Runtime.CompilerServices.ModuleInitializer]
-    internal static void SelfRegister()
-    {
-        CoopSyncRegistry.PendingRegister(false, () => new ButtonClickSync(), null, null, ToggleStateMsgType);
-        CoopSyncRegistry.PendingRegister(false, () => StateSnapshotSync.Register("button", BuildButtonSnapshot, ApplyButtonSnapshot));
-    }
     private static readonly string[] Keywords =
         { "Lever", "Rammer", "Hatch", "Primer", "Confirm", "Breech",
           "Power", "Reset", "Delete", "Measure", "Kill", "Lock", "Elevation", "Range", "Damage",
@@ -294,6 +286,13 @@ public sealed class ButtonClickSync : ISyncedModule
         catch (System.Exception ex) { CoopRuntime.LogSource?.LogWarning($"ButtonClickSync OnLocalClick: {ex.Message}"); }
     }
 
+    /// <summary>
+    /// 诊断工具用的公开判定（`InteractableNameTool` 要看“这个交互实体到底会不会被同步”，
+    /// **含配置开关判定**）；内部分支仍走 <see cref="ShouldTrack"/>。2026-09-13 补回
+    /// —— 之前工具引用了这个名字但方法被改名成 ShouldTrack，导致整个工程编译不过。
+    /// </summary>
+    public static bool IsTracked(LookAtTarget t) => ShouldTrack(t);
+
     private static bool ShouldTrack(LookAtTarget t)
     {
         try
@@ -324,12 +323,6 @@ public sealed class ButtonClickSync : ISyncedModule
             //  下装药拉杆 powder load 被 IsApplyingClick block 完全未广播）。
             if (nm.IndexOf("Button Dispencer", StringComparison.OrdinalIgnoreCase) >= 0
                 || nm.IndexOf("Charge Rammer", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-            // 预备激发火炮拉杆（Universal Button Arm Left/Right）：由 ArmSync 状态同步独占（patch
-            // ToggleLeft/ToggleRight → 140 状态），不走本层点击复现——否则"点击复现(118) + 状态(140)"
-            // 双通道双触发（toggle 两次 → 弹回），且按钮 inactive 时点击排队刷屏。
-            if (nm.IndexOf("Universal Button Arm", StringComparison.OrdinalIgnoreCase) >= 0
-                || nm.IndexOf("Arm Left", StringComparison.OrdinalIgnoreCase) >= 0
-                || nm.IndexOf("Arm Right", StringComparison.OrdinalIgnoreCase) >= 0) return false;
             // 发射台开关序列（LookAtTargetUnlockSequence5，.Check Switch.001~.004 下）：由 SequenceSync
             // 专门同步（含点击复现），不走本层点击/toggle——否则与 SequenceSync 双驱动反复回跳
             // （发射台 Switch / Universal Switch Button 争抢根因，2026-08-15 修复）。
@@ -345,14 +338,6 @@ public sealed class ButtonClickSync : ISyncedModule
             //   （4 个，楼梯折叠段）。必须由本模块完整复现点击（OnClickDown 驱动全部 toggler + 事件链），
             //   不能只靠 HatchSync SetBool 单个 IsOpen（其余段不同步 → 卡住）。
             //   故不在此排除——由 Keywords 命中（路径含 Hatch/Stair 时经 Universal Button/按钮关键词）。
-            //
-            // ⚠️ 2026-09-12 新增（用户要求，**默认关**）：Artillery Computer Console/Calculate Universal Button
-            //   （F10 实测：交互名 `Calculate Universal Button`，组件 Transform/Animator/LookAtTarget/BoxCollider/
-            //   AnimatorBoolToggler x4，与普通 Universal Button 同构）→ 走本模块「点击复现 + 多 toggler 状态轮询」。
-            //   该按钮原先无任何同步（路径不含任何 Keywords → 不跟踪），故单独按名字显式纳入，
-            //   并由配置文件开关控制（docs/CONFIG.md `[Interactables] CalculateButtonSync`，默认 false）。
-            if (nm.IndexOf("Calculate Universal Button", StringComparison.OrdinalIgnoreCase) >= 0)
-                return CoopConfig.CalculateButtonSync;
             foreach (var k in Keywords)
                 if (nm.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0
                     || path.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
@@ -360,10 +345,6 @@ public sealed class ButtonClickSync : ISyncedModule
         }
         catch { return false; }
     }
-
-    /// <summary>供调试工具/诊断查询：某 LookAtTarget 是否被本模块跟踪（含配置开关判定）。
-    /// ⚠️ 是"当前状态下"的判定（配置热重载/场景变化后可能变）。</summary>
-    public static bool IsTracked(LookAtTarget t) => ShouldTrack(t);
 
     /// <summary>即时广播所有打字机通知灯当前状态（事件驱动，打字机打印/清除时调用）。
     /// 通知灯亮灭时间可能短于轮询间隔（0.8s），轮询会错过亮的瞬间——打字机事件触发时

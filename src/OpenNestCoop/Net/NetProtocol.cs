@@ -81,7 +81,7 @@ public enum MsgType : byte
     V2GunLink = 229, // GunLinkSyncV2：仰角联动/锁定插销 isLinked（谁变化谁广播，主机中继）
     ControlFull = 145 // ValueSync 向量全量同步包（主机权威低频：整体签名变化才发全量绑定值，reliable 覆盖式应用）
     ,   NestMove = 146 // ⚠️ 2026-08-26：铁巢（TurretController）位置同步——主机权威，patch MoveTurret/SetTurretLocation
-    //  广播位置（对齐 Synchrony NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
+    //  广播位置（对齐 官方联机 NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
     // ⚠️ 新增消息类型不再在此硬编码枚举：MsgType 改为函数注册，由 NetManager 注册管理器统一分配
     //   （稳定 channelKey 自注册 → ChannelType(key) 取分配前导字节），见 CoffeeSync/MissionScriptSync。
 }

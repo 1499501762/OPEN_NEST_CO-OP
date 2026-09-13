@@ -145,6 +145,24 @@ dotnet build -c Release -p:DeployToGame=true
 - **局域网模式**（`-Lan`）：主机监听 `0.0.0.0:<端口>`（真实局域网可连），客机 TCP 直连；同 Steam 账号双开时主机自动派生
   唯一身份（`Fake#xxxx`）→ 可正常双开测试；详见 `docs/LAN.md`。首次运行 Windows 防火墙可能弹窗，需允许（专用网络）。
 
+### UI 自检开关（免手点，2026-09-12 新增）
+
+给游戏进程加命令行参数即可自检，结果都落在 `BepInEx\LogOutput.log` / `MelonLoader\Latest.log`：
+
+| 参数 | 作用 | 看什么日志 |
+|---|---|---|
+| `--lantab` | 菜单打开时**直接选中“局域网联机”选项卡**（免点击） | 面板布局/内容 |
+| `--copytest` | 启动时写一次系统剪贴板并回读 | `[Clipboard] self-test set=… via=win32|unity readback='…'` |
+
+```powershell
+# 例：自检剪贴板 + 直接看局域网面板（BepInEx 端）
+Start-Process "<GameDir(BepInEx)>\Iron Nest Heavy Turret Simulator.exe" `
+  -ArgumentList '--copytest','--lantab' -WorkingDirectory "<GameDir(BepInEx)>"
+```
+
+面板里点“复制”后的日志为 `[UI] clipboard copy ok=True via=win32 text='192.168.x.x:29507'`；
+若 `ok=False` 会在面板显示红字（`ErrCopyFailed`，通常=剪贴板被别的程序占用）。
+
 ### Steam 双账号测试（跨机 / 跨账号）
 
 > 所有参与者都必须安装本 mod，并**通过 Steam 启动游戏**（否则 Steam API 不可用）。

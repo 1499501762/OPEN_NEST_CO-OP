@@ -111,6 +111,7 @@ public class NetManager
 
     private ulong _joinedHostId;      // 加入方记住主机
     private float _pingTimer;
+    private float _steamProbeAt;      // Steam 就绪探测的下次到期时间（2Hz；见 Update 里的说明）
     private bool _steamContextAttempted;
     private bool _creatingLobby;      // 创建大厅异步窗口期防重复点击/重复创建
     private int _flushLog;
@@ -515,11 +516,20 @@ public class NetManager
         EnsureSteamContext();
 
         // 探测 Steam 就绪
-        try
+        // ⚠️ 2026-09-13：帧剖析实测这行每帧 ~0.12ms（`Steam.Probe` = 8–14 ms/s，两次 Steam IPC/帧），
+        //    纯浪费 → 降频到 2Hz（SteamReady 只会“就绪/未就绪”，半秒延迟无关紧要）。
+        _steamProbeAt -= dt;
+        if (_steamProbeAt <= 0f)
         {
-            SteamReady = SteamAPI.IsSteamRunning() && SteamUser.GetSteamID().IsValid();
+            _steamProbeAt = 0.5f;
+            long _tSteam = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                SteamReady = SteamAPI.IsSteamRunning() && SteamUser.GetSteamID().IsValid();
+            }
+            catch { SteamReady = false; }
+            FrameProfiler.Instance.AddMs("Steam.Probe", (System.Diagnostics.Stopwatch.GetTimestamp() - _tSteam) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
         }
-        catch { SteamReady = false; }
 
         if (SteamReady)
         {
@@ -540,15 +550,22 @@ public class NetManager
                 catch { }
             }
             // 泵 Steam 回调（游戏本身也在泵，多泵无害）
+            long _tCb = System.Diagnostics.Stopwatch.GetTimestamp();
             try { SteamAPI.RunCallbacks(); } catch { }
+            FrameProfiler.Instance.AddMs("Steam.Callbacks", (System.Diagnostics.Stopwatch.GetTimestamp() - _tCb) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
             // 自动联机（--autohost / --autojoin）：Steam 就绪后触发建房/加入
+            long _tAj = System.Diagnostics.Stopwatch.GetTimestamp();
             AutoJoin.TryStart(this);
+            FrameProfiler.Instance.AddMs("Steam.AutoJoin", (System.Diagnostics.Stopwatch.GetTimestamp() - _tAj) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
             // 大厅列表填充：Steam 回调内不做事，改在此安全上下文处理（防回调内同步 API 死锁）
+            long _tLobby = System.Diagnostics.Stopwatch.GetTimestamp();
             Lobby.PollPendingLobbyList();
+            FrameProfiler.Instance.AddMs("Steam.LobbyList", (System.Diagnostics.Stopwatch.GetTimestamp() - _tLobby) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
             // 清空 P2P 入包队列（仅在 Steam 就绪时，避免未初始化异常刷屏）
+            long _tPoll = System.Diagnostics.Stopwatch.GetTimestamp();
             while (Transport.Poll(out ulong from, out byte[] data))
             {
                 // 延迟模拟：入队延迟包，到期再分发；未启用则直通
@@ -557,6 +574,7 @@ public class NetManager
                 catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"packet process exception (from {from}): {ex}"); }
             }
             NetLagSim.Flush((f, d) => { try { OnPacket(f, d); } catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"lagged packet process exception (from {f}): {ex}"); } });
+            FrameProfiler.Instance.AddMs("Steam.Poll", (System.Diagnostics.Stopwatch.GetTimestamp() - _tPoll) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
         }
 
         UpdateCommon(dt);

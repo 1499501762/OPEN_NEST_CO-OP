@@ -35,7 +35,28 @@ public class SteamLobby
 {
     public bool IsHost;
     public CSteamID LobbyID;
-    public ulong HostSteamId => LobbyID.IsValid() ? (ulong)SteamMatchmaking.GetLobbyOwner(LobbyID) : 0;
+    /// <summary>
+    /// 房主 SteamID。
+    ///
+    /// ⚠️ 2026-09-13：以前这是个**每次读都调 `SteamMatchmaking.GetLobbyOwner`** 的属性，
+    /// 而它在所有同步模块的“发给房主”分支里被反复读（每个发送点至少 2 次）= 白白多出一批 Steam IPC。
+    /// 现在缓存：进/退房与成员变更时刷新（房主只可能在这几个时机变）。
+    /// </summary>
+    public ulong HostSteamId
+    {
+        get
+        {
+            try
+            {
+                if (_hostSteamId == 0 && LobbyID.IsValid())
+                    _hostSteamId = (ulong)SteamMatchmaking.GetLobbyOwner(LobbyID);
+            }
+            catch { }
+            return _hostSteamId;
+        }
+    }
+
+    private ulong _hostSteamId;
 
     public List<LobbyInfo> Browser = new();
     public int MaxPlayers;
@@ -131,6 +152,7 @@ public class SteamLobby
             try { SteamMatchmaking.LeaveLobby(LobbyID); } catch (Exception ex) { CoopRuntime.LogSource?.LogWarning($"LeaveLobby: {ex.Message}"); }
         }
         LobbyID = default;
+        _hostSteamId = 0;      // 退房 → 房主缓存失效
         IsHost = false;
         Left?.Invoke();
     }
@@ -158,6 +180,7 @@ public class SteamLobby
             return;
         }
         LobbyID = (CSteamID)p.m_ulSteamIDLobby;
+        _hostSteamId = 0;      // 新建房 → 房主缓存失效（下次读时重算）
         IsHost = true;
         MaxPlayers = SteamMatchmaking.GetLobbyMemberLimit(LobbyID);
         SteamMatchmaking.SetLobbyData(LobbyID, NetConfig.LobbyTagKey, NetConfig.LobbyTagValue);
@@ -186,6 +209,7 @@ public class SteamLobby
             return;
         }
         LobbyID = (CSteamID)p.m_ulSteamIDLobby;
+        _hostSteamId = 0;      // 进房 → 房主缓存失效（下次读时重算）
         IsHost = false;
         MaxPlayers = SteamMatchmaking.GetLobbyMemberLimit(LobbyID);
         try { PasswordHash = SteamMatchmaking.GetLobbyData(LobbyID, NetConfig.LobbyPasswordKey); } catch { PasswordHash = ""; }
@@ -274,6 +298,12 @@ public class SteamLobby
     private void OnLobbyChatUpdate(LobbyChatUpdate_t p)
     {
         if (!LobbyID.IsValid() || (ulong)p.m_ulSteamIDLobby != (ulong)LobbyID) return;
+        // ⚠️ 2026-09-13：房主缓存的**失效收口**。`HostSteamId` 改为缓存后（见该属性注释），
+        //    只靠进/退房清 0 是不够的：Steam 在房主离开时会把 owner 转给其他成员，
+        //    而各同步模块的“发给房主”分支会用旧值继续发错人。
+        //    这里：变更的正是缓存房主（离开/掉线/被踢）→ 清 0，下次读时重问 Steam owner。
+        if (_hostSteamId != 0 && (ulong)p.m_ulSteamIDUserChanged == _hostSteamId)
+            _hostSteamId = 0;
         MembersChanged?.Invoke();
     }
 

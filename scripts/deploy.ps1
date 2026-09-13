@@ -35,6 +35,15 @@ $wantMll = -not $BepOnly
 
 $bepProj = Join-Path $root "src\OpenNestCoop\OpenNestCoop.csproj"
 $mlProj  = Join-Path $root "src\OpenNestCoop.MelonMod\OpenNestCoop.MelonMod.csproj"
+# OpenNestModMenu（独立模组：自带 UI/日志基建，不依赖 OpenNestCore/OpenNestCoop）
+$mmBepProj = Join-Path $root "src\OpenNestModMenu\OpenNestModMenu.csproj"
+$mmMlProj  = Join-Path $root "src\OpenNestModMenu.MelonMod\OpenNestModMenu.MelonMod.csproj"
+# OpenNestUIKit（独立模组：原生 UI 库，动态布局/组件/多级菜单/原生菜单注入，见 docs/UI_KIT.md）
+$ukBepProj = Join-Path $root "src\OpenNestUIKit\OpenNestUIKit.csproj"
+$ukMlProj  = Join-Path $root "src\OpenNestUIKit.MelonMod\OpenNestUIKit.MelonMod.csproj"
+# OpenNestUIKit.Test（UI 库的测试模组：CLI 模拟点击/断言/报告，见 docs/UI_KIT_TEST.md）
+$ukTestBepProj = Join-Path $root "src\OpenNestUIKit.Test\OpenNestUIKit.Test.csproj"
+$ukTestMlProj  = Join-Path $root "src\OpenNestUIKit.Test.MelonMod\OpenNestUIKit.Test.MelonMod.csproj"
 
 # 玩家化身 bundle（方案A）：若仓库 model\player.bundle 存在则同步到两端游戏 Models\，
 # 供 AnimatorAvatarVisualProvider 运行时加载（见 tools/playerbundle/）。
@@ -48,6 +57,24 @@ if ($wantBep) {
     dotnet build $bepProj -c $BuildConfig -p:DeployToGame=true
     if ($LASTEXITCODE -ne 0) {
         Write-Host "BEPINEX BUILD FAILED" -ForegroundColor Red
+        exit 1
+    }
+    # OpenNestModMenu（BepInEx 版 -> BepInEx\plugins\）
+    dotnet build $mmBepProj -c $BuildConfig -p:DeployToGame=true
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "MODMENU BEPINEX BUILD FAILED" -ForegroundColor Red
+        exit 1
+    }
+    # OpenNestUIKit（BepInEx 版 -> BepInEx\plugins\）
+    dotnet build $ukBepProj -c $BuildConfig -p:DeployToGame=true
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "UIKIT BEPINEX BUILD FAILED" -ForegroundColor Red
+        exit 1
+    }
+    # OpenNestUIKit.Test（测试模组；不需要时注释这两行即可）
+    dotnet build $ukTestBepProj -c $BuildConfig -p:DeployToGame=true
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "UIKIT TEST BEPINEX BUILD FAILED" -ForegroundColor Red
         exit 1
     }
     Write-Host "== Deployed BepInEx ==" -ForegroundColor Green
@@ -94,6 +121,24 @@ if ($wantMll) {
         Copy-Item (Join-Path $mlBin "LiteNetLib.dll")            (Join-Path $clientLibs "LiteNetLib.dll")            -Force
         Copy-Item (Join-Path $mlBin "SharpGLTF.Core.dll")        (Join-Path $clientLibs "SharpGLTF.Core.dll")        -Force
         Copy-Item (Join-Path $mlBin "SharpGLTF.Runtime.dll")     (Join-Path $clientLibs "SharpGLTF.Runtime.dll")     -Force
+        # OpenNestModMenu（MLL 版 -> ClientGame\Mods\ + UserLibs\；由 csproj 的 DeployToMods 目标完成）
+        dotnet build $mmMlProj -c $BuildConfig -p:DeployToMods=true
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "MODMENU MLL BUILD FAILED" -ForegroundColor Red
+            exit 1
+        }
+        # OpenNestUIKit（MLL 版 -> ClientGame\Mods\ + UserLibs\）
+        dotnet build $ukMlProj -c $BuildConfig -p:DeployToMods=true
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "UIKIT MLL BUILD FAILED" -ForegroundColor Red
+            exit 1
+        }
+        # OpenNestUIKit.Test（MLL 版测试模组）
+        dotnet build $ukTestMlProj -c $BuildConfig -p:DeployToMods=true
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "UIKIT TEST MLL BUILD FAILED" -ForegroundColor Red
+            exit 1
+        }
         Write-Host "== Deployed MLL ==" -ForegroundColor Green
         Get-ChildItem $clientMods | Select-Object Name, Length
         # bundle -> D 端 Models\

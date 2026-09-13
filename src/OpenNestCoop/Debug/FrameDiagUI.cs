@@ -19,6 +19,7 @@ public class FrameDiagUI : MonoBehaviour
     private bool _show;
     private float _refresh;
     private float _dumpTimer;
+    private float _spikeAt;      // 上次尖峰 dump 时间（防刷屏）
     /// <summary>行样式枚举（颜色）。</summary>
     private enum Sk { Title, Normal, Good, Warn, Bad, Info }
     /// <summary>待绘制行：(文本, 右对齐数值(空=单行), 样式)。模块耗时用 名字+右对齐数值 两段。</summary>
@@ -93,6 +94,15 @@ public class FrameDiagUI : MonoBehaviour
             {
                 _dumpTimer = 0f;
                 LogDump();
+            }
+
+            // ⚠️ 2026-09-13：**尖峰即时落盘**。用户报“创建 Steam 大厅后掉到个位数”，而且是**间歇性**的
+            //    （“这次又不掉帧了”）——只靠 5s 周期 dump 很可能错过那一瞬。所以只要本结算窗口里
+            //    出现过 >60ms 的帧，就立刻再写一条带 [SPIKE] 标记的 dump（≥1.5s 间隔防刷屏）。
+            if (FrameProfiler.Instance.WorstFrameMs >= 60.0 && Time.unscaledTime - _spikeAt >= 1.5f)
+            {
+                _spikeAt = Time.unscaledTime;
+                LogDump("SPIKE");
             }
         }
         catch { }
@@ -228,13 +238,13 @@ public class FrameDiagUI : MonoBehaviour
     }
 
     /// <summary>独立诊断日志（key=frame.diag）：F7 打开时 dump FPS/帧时间 + 每模块帧开销 top。</summary>
-    private static void LogDump()
+    private static void LogDump(string tag = null)
     {
         try
         {
             var p = FrameProfiler.Instance;
             var sb = new System.Text.StringBuilder();
-            sb.Append($"[FrameDiag] F7 dump fps={p.FramesPerSec:0} avg={p.AvgFrameMs:0.0}ms worst={p.WorstFrameMs:0.0}ms | per-module ms/s:");
+            sb.Append($"[FrameDiag] F7 dump{(string.IsNullOrEmpty(tag) ? "" : "[" + tag + "]")} fps={p.FramesPerSec:0} avg={p.AvgFrameMs:0.0}ms worst={p.WorstFrameMs:0.0}ms | per-module ms/s:");
             var top = p.GetTop(10);
             for (int i = 0; i < top.Count; i++)
                 sb.Append($" {top[i].Name}={top[i].MsPerSec:0.00}");

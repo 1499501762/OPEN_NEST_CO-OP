@@ -23,6 +23,28 @@ public class DiagCycleController : MonoBehaviour
     {
         try
         {
+            // 开机参数：--framediag = 启动就直接开“帧性能”档（排查掉帧时不必手动按 F9；
+            // 也可写进 Steam 启动选项，玩家侧零操作就能采到 frame.log）。
+            if (!_argsChecked)
+            {
+                _argsChecked = true;
+                try
+                {
+                    var args = System.Environment.GetCommandLineArgs();
+                    for (int i = 0; i < args.Length; i++)
+                    {
+                        if (string.Equals(args[i], "--framediag", System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            _mode = DiagMode.Frame;
+                            Apply();
+                            CoopRuntime.LogSource?.LogInfo("[DiagCycle] --framediag → 帧性能档（每 5s 写 OpenNestLogs/frame.log）");
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+
             // F9 循环切换（新 Input System——旧 UnityEngine.Input 在 IL2CPP 下被禁用）
             var kb = UnityEngine.InputSystem.Keyboard.current;
             if (kb != null && kb.f9Key.wasPressedThisFrame)
@@ -30,6 +52,8 @@ public class DiagCycleController : MonoBehaviour
         }
         catch { }
     }
+
+    private bool _argsChecked;
 
     private void Cycle()
     {

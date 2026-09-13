@@ -198,7 +198,7 @@ V1 `PlayerSync.ResolveProvider` 与 V2 `PlayerSyncV2.ResolveProvider` 共用同�
 - **D 端（client，MelonLoader）**：构建 `src\OpenNestCoop.MelonMod\OpenNestCoop.MelonMod.csproj -c Release -p:DeployToMods=true`
   → ⚠️ 但 `MLBase=$(GameDir)\MLLoader` 会部署到 **G 端** `MLLoader\Mods`（不是 D 端！）。
   **D 端需手动复制** `bin\Release\net6.0\OpenNestCoop.MelonMod.dll` 到 `D:\...\Mods\`。
-- G 端 MLLoader 目录有用户侧载模组（如 `IronNestFCS.CustomRecords.dll`），**不要动**。
+- G 端 MLLoader 目录有用户侧载模组（如 `SomeMod.CustomRecords.dll`），**不要动**。
 
 ---
 

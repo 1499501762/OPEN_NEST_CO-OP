@@ -14,7 +14,7 @@
     <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
     <!-- MelonLoader interop 目录。注意：两加载器的 Il2CppInterop.Runtime 版本不同
          （BepInEx 1.5.3 / MelonLoader 1.5.1），第三方跨平台引用需用对应平台编译的 dll。 -->
-    <MelonLoaderDir Condition="'$(MelonLoaderDir)'==''">D:\SteamLibrary\steamapps\common\Iron Nest Heavy Turret Simulator\MelonLoader</MelonLoaderDir>
+    <MelonLoaderDir Condition="'$(MelonLoaderDir)'==''">C:\steam\steamapps\common\Iron Nest Heavy Turret Simulator\MelonLoader</MelonLoaderDir>
     <!-- 双平台互操作切换：-p:UseMelonLoaderInterop=true 时按 MelonLoader interop 编译 -->
     <UseMelonLoaderInterop Condition="'$(UseMelonLoaderInterop)'==''">false</UseMelonLoaderInterop>
     <InteropRoot Condition="'$(UseMelonLoaderInterop)'=='true'">$(MelonLoaderDir)\Il2CppAssemblies</InteropRoot>

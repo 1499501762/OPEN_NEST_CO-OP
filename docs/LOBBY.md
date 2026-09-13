@@ -21,6 +21,7 @@
 - 2026-08-23（九修）**通用输入框组件 `UI/CoopInputBox.cs`**：封装自制 Button+Text 视觉 + 值/密码掩码/占位/光标/聚焦/提交回调 + AppendText/BackspaceChar；输入/IME 逻辑统一路由到 `CoopInputBox.Active`（当前聚焦输入框），移除 `_inputPassword`/`_focusBoxScreenPos`/`MakeInputBox`/`ToggleTyping`。房间名(1)/密码(2)/弹窗密码(3) 复用；Rebuild 后 `RestoreActiveBox` 恢复聚焦。聊天仍用真实 TMP_InputField（机制不同未迁移）。
   ⚠️ **IL2CPP 坑**：mod 自定义类型用泛型 `AddComponent<T>()` 崩（`MethodInfoStoreGeneric_AddComponent` NRE）→ `CoopInputBox` 用**普通类**（只 AddComponent Unity 类型，按钮回调驱动），否则 UI 元素消失（Rebuild 异常）。
 - 2026-08-23（十修）排查「输入框消失」：`CoopInputBox.Create` 加创建诊断日志（`[UI] InputBox kind=… created pos=(…) active=… parent=…`）→ 确认房间名/密码框均创建成功且 `active=True`、位置正确、记住的房间名仍在（`value='…'`）。根因：**非 bug**——当时游戏处于会话中（`RebuildChat show=True`，`BuildLobby` 状态无输入框），退出回大厅（Idle）即正常显示。保留创建诊断日志便于将来排查。
+- 2026-09-13 **房主 SteamID 缓存**（“创建大厅后主机掉帧”修复其一，见 `KNOWN_ISSUES.md`）：`SteamLobby.HostSteamId` 原先是**每次读都调 `SteamMatchmaking.GetLobbyOwner`** 的属性，而它在所有同步模块的“发给房主”分支里被反复读（每个发送点至少 2 次）→ 与 Steam IPC 叠加占帧。改为缓存字段 `_hostSteamId`：**建房**（`OnLobbyCreated`）/ **进房**（`OnLobbyEntered`）/ **退房**（`LeaveLobby`）清 0；另在 **成员变更**（`OnLobbyChatUpdate`）中，若变更者正是缓存房主（离开/掉线/被踢）也清 0——Steam 会把 owner 转给其他成员，不清缓存会继续往已离开的人发包。下次读时重新问 Steam。
 
 ---
 

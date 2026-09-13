@@ -80,7 +80,7 @@ public static class HarmonyPatches
         TryPatch(typeof(PowderChargeController), "OnChargeButtonPressed", prefix: nameof(PrePowderSelect));
         TryPatch(typeof(PowderChargeController), "OnLoadChargesPressed", prefix: nameof(PrePowderLoad));
         // ⚠️ 2026-08-26：铁巢（TurretController）位置同步——patch MoveTurret/SetTurretLocation（对齐
-        // Synchrony NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
+        // 官方联机 NestMoveBridge）。铁巢位置两端一致 → 追踪器（炮弹从铁巢坐标发射到着弹点）轨迹一致。
         // 主机权威：主机移动铁巢 postfix 广播，客机拦截本地移动（prefix）+ 接收广播应用（防环）。
         // ⚠️ 必须显式指定参数类型（Vector3）：AccessTools.Method 无参数类型在 IL2CPP 下找不到
         // MoveTurret/SetTurretLocation（有 Vector3 参数）→ patch 失败 → 铁巢位置同步不生效。
